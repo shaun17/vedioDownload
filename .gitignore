@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+# 注意：真实登录态 Cookie 只应在运行时注入，不要提交到仓库
+
+*.mp4
+videos/
+.DS_Store
+.idea/
+.vscode/
