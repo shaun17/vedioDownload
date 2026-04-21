@@ -165,7 +165,7 @@ class TestRunSingleWorkflowRouting:
     @patch("xhs_colab_pipeline.extract_audio_track")
     @patch("xhs_colab_pipeline.download_xhs_video_result")
     @patch("xhs_colab_pipeline.download_yt_dlp_video_result")
-    def test_generic_url_uses_yt_dlp_then_existing_transcription_flow(
+    def test_generic_url_downloads_video_but_transcribes_direct_mp3(
         self,
         mock_yt_dlp_download,
         mock_xhs_download,
@@ -175,8 +175,9 @@ class TestRunSingleWorkflowRouting:
     ):
         url = "https://example.com/watch?v=abc"
         task_id = build_generic_task_id(url)
-        video_path = tmp_path / "drive" / task_id / f"{task_id}.mp3"
-        mock_yt_dlp_download.return_value = VideoDownloadResult(
+        video_path = tmp_path / "drive" / task_id / f"{task_id}.mp4"
+        audio_path = tmp_path / "local" / task_id / f"{task_id}_transcription_audio.mp3"
+        video_result = VideoDownloadResult(
             note_id=task_id,
             note_url=url,
             resolved_url=url,
@@ -189,10 +190,26 @@ class TestRunSingleWorkflowRouting:
             fps=30,
             avg_bitrate=1_000_000,
             size=1024,
+            format="mp4",
+            quality_index=0,
+        )
+        audio_result = VideoDownloadResult(
+            note_id=f"{task_id}_transcription_audio",
+            note_url=url,
+            resolved_url=url,
+            output_path=str(audio_path),
+            filename=audio_path.name,
+            codec="none",
+            audio_codec="mp3",
+            width=0,
+            height=0,
+            fps=0,
+            avg_bitrate=128_000,
+            size=512,
             format="mp3",
             quality_index=0,
         )
-        mock_extract_audio.return_value = str(tmp_path / "local" / task_id / "audio.wav")
+        mock_yt_dlp_download.side_effect = [video_result, audio_result]
         mock_transcribe.return_value = TranscriptionResult(
             text="通用视频文稿",
             language="zh",
@@ -214,13 +231,19 @@ class TestRunSingleWorkflowRouting:
         assert result.note_id == task_id
         assert result.transcript_preview == "通用视频文稿"
         mock_xhs_download.assert_not_called()
-        mock_yt_dlp_download.assert_called_once()
-        assert mock_yt_dlp_download.call_args.kwargs["video_url"] == url
-        assert mock_yt_dlp_download.call_args.kwargs["task_id"] == task_id
-        assert mock_yt_dlp_download.call_args.kwargs["output_dir"].endswith(task_id)
-        assert mock_yt_dlp_download.call_args.kwargs["media_type"] == "video"
-        mock_extract_audio.assert_called_once_with(str(video_path), str(tmp_path / "local" / task_id / "audio.wav"))
+        assert mock_yt_dlp_download.call_count == 2
+        video_call, audio_call = mock_yt_dlp_download.call_args_list
+        assert video_call.kwargs["video_url"] == url
+        assert video_call.kwargs["task_id"] == task_id
+        assert video_call.kwargs["output_dir"].endswith(task_id)
+        assert video_call.kwargs["media_type"] == "video"
+        assert audio_call.kwargs["video_url"] == url
+        assert audio_call.kwargs["task_id"] == f"{task_id}_transcription_audio"
+        assert Path(audio_call.kwargs["output_dir"]) == tmp_path / "local" / task_id
+        assert audio_call.kwargs["media_type"] == "audio"
+        mock_extract_audio.assert_not_called()
         mock_transcribe.assert_called_once()
+        assert mock_transcribe.call_args.kwargs["audio_path"] == str(audio_path)
 
     @patch("xhs_colab_pipeline.transcribe_with_faster_whisper")
     @patch("xhs_colab_pipeline.extract_audio_track")

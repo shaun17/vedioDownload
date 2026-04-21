@@ -280,6 +280,41 @@ def extract_audio_track(video_path: str | Path, audio_path: str | Path) -> str:
     return str(target)
 
 
+def prepare_transcription_audio(
+    video_url: str,
+    download_result: VideoDownloadResult,
+    paths: WorkflowPaths,
+    is_xiaohongshu: bool,
+) -> str:
+    """
+    准备给 Whisper 使用的转录音频。
+
+    小红书继续从已下载视频抽取 WAV；通用链接额外用 yt-dlp 直接提取
+    MP3，避免从合并后的 MP4 再抽音频导致转录质量下降。
+    """
+    if is_xiaohongshu:
+        return extract_audio_track(download_result.output_path, paths.local_audio_path)
+
+    audio_result = download_yt_dlp_video_result(
+        video_url=video_url,
+        output_dir=paths.local_task_dir,
+        task_id=f"{paths.note_id}_transcription_audio",
+        media_type="audio",
+    )
+    return audio_result.output_path
+
+
+def cleanup_local_transcription_audio(audio_path: str | Path, local_task_dir: str | Path) -> None:
+    """清理本地临时转录音频，并防止误删 Drive 中的最终媒体文件。"""
+    path = Path(audio_path).resolve()
+    local_root = Path(local_task_dir).resolve()
+    try:
+        path.relative_to(local_root)
+    except ValueError:
+        return
+    path.unlink(missing_ok=True)
+
+
 def render_plain_transcript(segments: list[dict]) -> str:
     """
     将分段结果渲染为纯文本。
@@ -466,8 +501,8 @@ def run_single_workflow(
     流程固定为：
       1. 解析 note_id
       2. 检查 Drive 中是否已有结果
-      3. 在本地临时目录下载视频
-      4. 抽取音频并执行转录
+      3. 下载最终媒体文件
+      4. 准备高质量音频并执行转录
       5. 将最终结果复制到 Drive
     """
     resolved_url, note_id, is_xiaohongshu = resolve_workflow_identity(note_url)
@@ -502,9 +537,14 @@ def run_single_workflow(
         prefer_codec=prefer_codec,
         quality_index=quality_index,
     )
-    extract_audio_track(download_result.output_path, paths.local_audio_path)
+    transcription_audio_path = prepare_transcription_audio(
+        video_url=resolved_url,
+        download_result=download_result,
+        paths=paths,
+        is_xiaohongshu=is_xiaohongshu,
+    )
     transcription_result = transcribe_with_faster_whisper(
-        audio_path=paths.local_audio_path,
+        audio_path=transcription_audio_path,
         model_name=model_name,
         language=language,
         beam_size=beam_size,
@@ -517,7 +557,7 @@ def run_single_workflow(
     write_json_file(paths.drive_metadata_path, metadata)
 
     # 音频只是中间文件，复制完成后删除可减少 Colab 临时盘占用。
-    Path(paths.local_audio_path).unlink(missing_ok=True)
+    cleanup_local_transcription_audio(transcription_audio_path, paths.local_task_dir)
 
     return WorkflowResult(
         note_id=note_id,

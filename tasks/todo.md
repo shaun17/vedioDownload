@@ -87,3 +87,21 @@
 - 验证证据：`.venv/bin/python -m pytest tests/test_xhs_downloader.py tests/test_xhs_colab_pipeline.py tests/test_yt_dlp_downloader.py`
 - 验证结果：68 个测试全部通过。
 - 格式选择验证：X 链接正常路径选择 `hls-553+hls-audio-128000-Audio`；HTTP 兜底路径选择 `http-256`，均未选择 `http-2176`。
+
+## 2026-04-21 yt-dlp 转录音频源修复
+
+- [x] 确认通用链接当前从合并 MP4 抽音频再转录
+- [x] 改为通用链接保存 MP4 不变，但额外下载本地 MP3 用于转录
+- [x] 保持小红书链接现有抽 WAV 转录路径
+- [x] 补充测试并执行验证
+- [x] 记录最终 review
+
+## Review 2026-04-21 yt-dlp 转录音频源修复
+
+- 已将通用链接的转录输入改为 yt-dlp `audio` 模式直接提取的本地 MP3，不再从合并后的 MP4 抽音频。
+- 通用链接仍先下载 MP4 到 Drive，`WorkflowResult.video_path` 和 metadata 中的视频输出继续指向最终 MP4。
+- 小红书链接不受影响，仍使用 `xhs_downloader.py` 下载视频后通过 ffmpeg 抽取本地 WAV 转录。
+- 本地 MP3 只作为临时转录音频，转录完成后清理，不写入 Drive 输出目录。
+- 验证证据：`.venv/bin/python -m pytest tests/test_xhs_downloader.py tests/test_xhs_colab_pipeline.py tests/test_yt_dlp_downloader.py`
+- 验证结果：68 个测试全部通过。
+- 额外验证：`.venv/bin/python -m py_compile xhs_colab_pipeline.py yt_dlp_downloader.py` 通过。
