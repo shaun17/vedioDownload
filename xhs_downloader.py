@@ -46,6 +46,9 @@ HEADERS = {
     "Origin": "https://www.xiaohongshu.com",
 }
 
+# 直接执行脚本时，默认把视频放到独立目录，避免落在仓库根目录。
+DEFAULT_CLI_OUTPUT_DIR = "downloads"
+
 
 @dataclass
 class VideoDownloadResult:
@@ -593,23 +596,49 @@ def download_xhs_video(
     ).output_path
 
 
+def parse_cli_arguments(argv: list[str]) -> tuple[str, str, str, int]:
+    """
+    解析脚本命令行参数，并补齐直接执行脚本时的默认值。
+
+    这里单独抽成函数，便于测试“默认输出目录不再落到根目录”这个行为。
+    """
+    url = argv[1]
+    output_dir = argv[2] if len(argv) > 2 else DEFAULT_CLI_OUTPUT_DIR
+    codec = argv[3] if len(argv) > 3 else "hevc"
+    quality_index = int(argv[4]) if len(argv) > 4 else 0
+    return url, output_dir, codec, quality_index
+
+
+def main(argv: list[str] | None = None) -> int:
+    """
+    命令行入口。
+
+    只调整脚本直跑时的默认输出目录，不改下载函数本身的默认参数，
+    从而避免影响其他显式传入输出目录的调用方。
+    """
+    runtime_argv = argv or sys.argv
+    if len(runtime_argv) < 2:
+        print("用法: python xhs_downloader.py <小红书笔记URL> [输出目录] [hevc|h264] [画质索引]")
+        print(
+            "示例: python xhs_downloader.py "
+            "'https://www.xiaohongshu.com/explore/xxxx?xsec_token=...' "
+            f"./{DEFAULT_CLI_OUTPUT_DIR} hevc 0"
+        )
+        print(f"默认输出目录: ./{DEFAULT_CLI_OUTPUT_DIR}")
+        return 1
+
+    url, out_dir, codec, q_index = parse_cli_arguments(runtime_argv)
+    try:
+        result_path = download_xhs_video(url, out_dir, codec, q_index)
+        print(f"\n🎉 视频已保存至: {result_path}")
+        return 0
+    except Exception as error:
+        print(f"\n❌ 错误: {error}")
+        return 1
+
+
 # ─────────────────────────────────────────────
 # CLI 入口
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("用法: python xhs_downloader.py <小红书笔记URL> [输出目录] [hevc|h264] [画质索引]")
-        print("示例: python xhs_downloader.py 'https://www.xiaohongshu.com/explore/xxxx?xsec_token=...' ./videos hevc 0")
-        sys.exit(1)
-
-    url        = sys.argv[1]
-    out_dir    = sys.argv[2] if len(sys.argv) > 2 else "."
-    codec      = sys.argv[3] if len(sys.argv) > 3 else "hevc"
-    q_index    = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-
-    try:
-        result_path = download_xhs_video(url, out_dir, codec, q_index)
-        print(f"\n🎉 视频已保存至: {result_path}")
-    except Exception as e:
-        print(f"\n❌ 错误: {e}")
-        sys.exit(1)
+    sys.exit(main())

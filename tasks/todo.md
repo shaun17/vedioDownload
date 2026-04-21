@@ -19,3 +19,17 @@
 - 验证证据：`.venv/bin/python -m pytest tests/test_xhs_downloader.py tests/test_xhs_colab_pipeline.py`
 - 验证结果：48 个测试全部通过。
 - 未验证项：当前环境不是 Colab，未实际执行 Drive 挂载、ffmpeg 抽音频和 GPU 转录。
+
+## 2026-04-21 CLI 默认输出目录
+
+- [x] 确认直接执行 `xhs_downloader.py` 的默认输出路径和 `run_colab_workflow` 的显式输出路径
+- [x] 将 `xhs_downloader.py` 的脚本默认输出目录改为独立目录
+- [x] 补充测试并执行验证
+
+## Review 2026-04-21
+
+- 已将 `xhs_downloader.py` 直接执行时的默认输出目录改为 `./downloads`，避免视频文件落在仓库根目录。
+- 本次只调整了脚本入口的默认参数解析，未改动 `download_xhs_video_result(...)` 的显式 `output_dir` 调用链，因此 `run_colab_workflow` 继续按原逻辑写入 Drive。
+- 已新增 CLI 参数解析测试，覆盖“未传输出目录时默认使用独立目录”和“显式输出目录保持不变”两种行为。
+- 验证证据：`.venv/bin/python -m pytest tests/test_xhs_downloader.py tests/test_xhs_colab_pipeline.py`
+- 验证结果：50 个测试全部通过。

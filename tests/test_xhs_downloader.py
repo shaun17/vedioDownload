@@ -29,6 +29,8 @@ from xhs_downloader import (
     merge_cookies,
     choose_stream,
     build_output_filename,
+    parse_cli_arguments,
+    DEFAULT_CLI_OUTPUT_DIR,
 )
 
 
@@ -452,3 +454,28 @@ class TestStreamSelectionHelpers:
             {"width": 1280, "height": 720, "codec": "h264", "format": "mp4"},
         )
         assert filename == "xhs_69c7e067000000002202809d_1280x720_h264.mp4"
+
+
+class TestCliArgumentParsing:
+    def test_parse_cli_arguments_uses_dedicated_default_output_dir(self):
+        url, output_dir, codec, quality_index = parse_cli_arguments(
+            ["xhs_downloader.py", "https://www.xiaohongshu.com/explore/69c7e067000000002202809d"]
+        )
+        assert url == "https://www.xiaohongshu.com/explore/69c7e067000000002202809d"
+        assert output_dir == DEFAULT_CLI_OUTPUT_DIR
+        assert codec == "hevc"
+        assert quality_index == 0
+
+    def test_parse_cli_arguments_keeps_explicit_output_dir(self):
+        _, output_dir, codec, quality_index = parse_cli_arguments(
+            [
+                "xhs_downloader.py",
+                "https://www.xiaohongshu.com/explore/69c7e067000000002202809d",
+                "./custom-dir",
+                "h264",
+                "2",
+            ]
+        )
+        assert output_dir == "./custom-dir"
+        assert codec == "h264"
+        assert quality_index == 2
