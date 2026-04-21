@@ -16,6 +16,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from xhs_downloader import (
     VideoDownloadResult,
@@ -24,10 +25,13 @@ from xhs_downloader import (
     parse_note_url,
     resolve_note_url,
 )
+from yt_dlp_downloader import build_generic_task_id, download_yt_dlp_video_result
 
 
 DEFAULT_LOCAL_ROOT = Path("/content/xhs_workspace")
 DEFAULT_DRIVE_ROOT = Path("/content/drive/MyDrive/xhs_outputs")
+XIAOHONGSHU_DOMAINS = ("xiaohongshu.com", "xhslink.com")
+MEDIA_OUTPUT_PATTERNS = ("*.mp4", "*.mp3", "*.m4a", "*.webm", "*.mov")
 
 
 @dataclass
@@ -129,6 +133,32 @@ def resolve_transcription_runtime(has_cuda: bool) -> tuple[str, str]:
     return "cpu", "int8"
 
 
+def is_xiaohongshu_url(video_url: str) -> bool:
+    """判断 URL 是否应使用小红书专用下载器处理。"""
+    host = urlparse(video_url.replace("\\", "")).hostname or ""
+    normalized_host = host.lower()
+    return any(
+        normalized_host == domain or normalized_host.endswith(f".{domain}")
+        for domain in XIAOHONGSHU_DOMAINS
+    )
+
+
+def resolve_workflow_identity(video_url: str) -> tuple[str, str, bool]:
+    """
+    解析流水线任务身份。
+
+    小红书使用真实 note_id；其他站点使用 URL hash，避免非小红书链接
+    在 parse_note_url 阶段失败。
+    """
+    normalized_url = video_url.strip()
+    if is_xiaohongshu_url(normalized_url):
+        resolved_url = resolve_note_url(normalized_url)
+        note_id, _, _ = parse_note_url(resolved_url)
+        return resolved_url, note_id, True
+
+    return normalized_url, build_generic_task_id(normalized_url), False
+
+
 def build_workflow_paths(
     note_id: str,
     local_root: str | Path = DEFAULT_LOCAL_ROOT,
@@ -156,16 +186,30 @@ def has_existing_drive_outputs(drive_task_dir: str | Path) -> bool:
     """
     检查 Drive 中是否已经存在完整产物。
 
-    只有同时存在视频、文稿和元数据时，才认为这一条任务可以跳过。
+    只有同时存在媒体、文稿和元数据时，才认为这一条任务可以跳过。
     """
     task_dir = Path(drive_task_dir)
     if not task_dir.exists():
         return False
 
-    has_video = any(task_dir.glob("*.mp4"))
+    has_video = any(
+        path.exists()
+        for pattern in MEDIA_OUTPUT_PATTERNS
+        for path in task_dir.glob(pattern)
+    )
     has_transcript = (task_dir / "transcript.txt").exists()
     has_metadata = (task_dir / "metadata.json").exists()
     return has_video and has_transcript and has_metadata
+
+
+def find_existing_media_output(task_dir: str | Path) -> Path:
+    """按支持的媒体扩展名查找已有输出文件。"""
+    root = Path(task_dir)
+    for pattern in MEDIA_OUTPUT_PATTERNS:
+        existing_file = next(root.glob(pattern), None)
+        if existing_file:
+            return existing_file
+    return root / ""
 
 
 def is_running_in_colab() -> bool:
@@ -352,6 +396,56 @@ def build_workflow_metadata(
     }
 
 
+def download_video_for_workflow(
+    video_url: str,
+    paths: WorkflowPaths,
+    is_xiaohongshu: bool,
+    cookies: dict | None = None,
+    prefer_codec: str = "hevc",
+    quality_index: int = 0,
+) -> VideoDownloadResult:
+    """
+    按来源选择下载器。
+
+    小红书继续复用现有签名流解析；其他域名交给 yt-dlp，
+    但输出目录仍然使用流水线已有 Drive 目录。
+    """
+    if is_xiaohongshu:
+        return download_xhs_video_result(
+            note_url=video_url,
+            output_dir=paths.drive_video_dir,
+            prefer_codec=prefer_codec,
+            quality_index=quality_index,
+            cookies=cookies,
+        )
+
+    return download_yt_dlp_video_result(
+        video_url=video_url,
+        output_dir=paths.drive_video_dir,
+        task_id=paths.note_id,
+        media_type="audio",
+    )
+
+
+def build_failed_workflow_result(note_url: str, error: Exception) -> WorkflowResult:
+    """构建失败结果，确保非小红书 URL 失败时也不会再次触发 note_id 解析错误。"""
+    try:
+        _, task_id, _ = resolve_workflow_identity(note_url)
+    except Exception:
+        task_id = build_generic_task_id(note_url)
+
+    return WorkflowResult(
+        note_id=task_id,
+        note_url=note_url,
+        status="failed",
+        video_path="",
+        transcript_path="",
+        metadata_path="",
+        transcript_preview="",
+        error=str(error),
+    )
+
+
 def run_single_workflow(
     note_url: str,
     cookies: dict | None = None,
@@ -376,14 +470,13 @@ def run_single_workflow(
       4. 抽取音频并执行转录
       5. 将最终结果复制到 Drive
     """
-    runtime_cookies = merge_cookies(cookies)
-    resolved_url = resolve_note_url(note_url)
-    note_id, _, _ = parse_note_url(resolved_url)
+    resolved_url, note_id, is_xiaohongshu = resolve_workflow_identity(note_url)
+    runtime_cookies = merge_cookies(cookies) if is_xiaohongshu else {}
     paths = build_workflow_paths(note_id=note_id, local_root=local_root, drive_root=drive_root)
 
     if skip_existing and has_existing_drive_outputs(paths.drive_task_dir):
         drive_dir = Path(paths.drive_task_dir)
-        existing_video = next(drive_dir.glob("*.mp4"), drive_dir / "")
+        existing_video = find_existing_media_output(drive_dir)
         preview = ""
         transcript_path = drive_dir / "transcript.txt"
         if transcript_path.exists():
@@ -401,12 +494,13 @@ def run_single_workflow(
     Path(paths.local_task_dir).mkdir(parents=True, exist_ok=True)
     Path(paths.drive_task_dir).mkdir(parents=True, exist_ok=True)
 
-    download_result = download_xhs_video_result(
-        note_url=note_url,
-        output_dir=paths.drive_video_dir,
+    download_result = download_video_for_workflow(
+        video_url=resolved_url,
+        paths=paths,
+        is_xiaohongshu=is_xiaohongshu,
+        cookies=runtime_cookies,
         prefer_codec=prefer_codec,
         quality_index=quality_index,
-        cookies=runtime_cookies,
     )
     extract_audio_track(download_result.output_path, paths.local_audio_path)
     transcription_result = transcribe_with_faster_whisper(
@@ -482,18 +576,7 @@ def run_colab_workflow(
                 skip_existing=skip_existing,
             )
         except Exception as error:
-            resolved_url = resolve_note_url(note_url)
-            note_id, _, _ = parse_note_url(resolved_url)
-            result = WorkflowResult(
-                note_id=note_id,
-                note_url=note_url,
-                status="failed",
-                video_path="",
-                transcript_path="",
-                metadata_path="",
-                transcript_preview="",
-                error=str(error),
-            )
+            result = build_failed_workflow_result(note_url, error)
         results.append(result)
     return results
 

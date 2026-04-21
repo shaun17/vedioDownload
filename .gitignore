@@ -7,6 +7,10 @@ venv/
 # 注意：真实登录态 Cookie 只应在运行时注入，不要提交到仓库
 
 *.mp4
+*.mp3
+*.m4a
+*.webm
+downloads/
 videos/
 .DS_Store
 .idea/
