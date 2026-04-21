@@ -19,15 +19,22 @@ from xhs_downloader import VideoDownloadResult
 # 本地直接执行脚本时的默认输出目录，和 xhs_downloader.py 保持一致。
 DEFAULT_YT_DLP_OUTPUT_DIR = "downloads"
 
-# 通用链接默认下载音频，和本地验证过的 `yt-dlp -x --audio-format mp3` 行为一致。
+# 通用链接默认下载 MP4 视频；audio 模式用于只提取 mp3。
 DEFAULT_YT_DLP_AUDIO_FORMAT = "bestaudio/best"
 
-# 视频模式优先走 HLS，避免 Twitter/X 这类站点选中超大的 HTTPS 直连视频。
+# 视频模式优先走 HLS；如果 HLS 探测超时，HTTP 兜底只选低码率 MP4，
+# 避免 Twitter/X 回退到 `http-2176` 这类超大 HTTPS 直连文件。
 DEFAULT_YT_DLP_VIDEO_FORMAT = (
     "bv*[protocol^=m3u8][ext=mp4]+ba[protocol^=m3u8]/"
-    "b[protocol^=m3u8]/"
-    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best"
+    "b[protocol^=m3u8][ext=mp4]/"
+    "b[ext=mp4][height<=360][tbr<=400]/"
+    "b[ext=mp4][height<=360]/"
+    "b[ext=mp4][tbr<=1000]/"
+    "w[ext=mp4]/"
+    "b[ext=mp4]/best"
 )
+DEFAULT_YT_DLP_SOCKET_TIMEOUT = 60
+DEFAULT_YT_DLP_RETRIES = 10
 
 
 def build_generic_task_id(video_url: str) -> str:
@@ -56,7 +63,7 @@ def load_yt_dlp_module():
 def build_yt_dlp_options(
     output_dir: str | Path,
     task_id: str,
-    media_type: str = "audio",
+    media_type: str = "video",
     quiet: bool = False,
 ) -> dict[str, Any]:
     """构建 yt-dlp 下载参数，统一输出文件名和音视频下载模式。"""
@@ -69,6 +76,11 @@ def build_yt_dlp_options(
         "outtmpl": {"default": output_path_template},
         "noplaylist": True,
         "restrictfilenames": True,
+        "socket_timeout": DEFAULT_YT_DLP_SOCKET_TIMEOUT,
+        "retries": DEFAULT_YT_DLP_RETRIES,
+        "fragment_retries": DEFAULT_YT_DLP_RETRIES,
+        "extractor_retries": DEFAULT_YT_DLP_RETRIES,
+        "file_access_retries": DEFAULT_YT_DLP_RETRIES,
         "quiet": quiet,
         "no_warnings": quiet,
     }
@@ -170,7 +182,7 @@ def download_yt_dlp_video_result(
     video_url: str,
     output_dir: str | Path = DEFAULT_YT_DLP_OUTPUT_DIR,
     task_id: str | None = None,
-    media_type: str = "audio",
+    media_type: str = "video",
     quiet: bool = False,
 ) -> VideoDownloadResult:
     """使用 yt-dlp 下载媒体，并返回兼容 Colab 流水线的结果对象。"""
@@ -202,7 +214,7 @@ def parse_cli_arguments(argv: list[str]) -> tuple[str, str, str]:
     """解析本地下载脚本参数。"""
     video_url = argv[1]
     output_dir = argv[2] if len(argv) > 2 else DEFAULT_YT_DLP_OUTPUT_DIR
-    media_type = argv[3] if len(argv) > 3 else "audio"
+    media_type = argv[3] if len(argv) > 3 else "video"
     return video_url, output_dir, media_type
 
 
@@ -212,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(runtime_argv) < 2:
         print("用法: python yt_dlp_downloader.py <视频URL> [输出目录] [audio|video]")
         print(f"默认输出目录: ./{DEFAULT_YT_DLP_OUTPUT_DIR}")
-        print("默认下载模式: audio（提取 mp3，适合转录）")
+        print("默认下载模式: video（下载 mp4 视频）；传 audio 可只提取 mp3")
         return 1
 
     video_url, output_dir, media_type = parse_cli_arguments(runtime_argv)

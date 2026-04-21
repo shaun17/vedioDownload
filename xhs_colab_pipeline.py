@@ -423,7 +423,7 @@ def download_video_for_workflow(
         video_url=video_url,
         output_dir=paths.drive_video_dir,
         task_id=paths.note_id,
-        media_type="audio",
+        media_type="video",
     )
 
 

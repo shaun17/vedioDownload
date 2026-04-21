@@ -218,7 +218,7 @@ class TestRunSingleWorkflowRouting:
         assert mock_yt_dlp_download.call_args.kwargs["video_url"] == url
         assert mock_yt_dlp_download.call_args.kwargs["task_id"] == task_id
         assert mock_yt_dlp_download.call_args.kwargs["output_dir"].endswith(task_id)
-        assert mock_yt_dlp_download.call_args.kwargs["media_type"] == "audio"
+        assert mock_yt_dlp_download.call_args.kwargs["media_type"] == "video"
         mock_extract_audio.assert_called_once_with(str(video_path), str(tmp_path / "local" / task_id / "audio.wav"))
         mock_transcribe.assert_called_once()
 

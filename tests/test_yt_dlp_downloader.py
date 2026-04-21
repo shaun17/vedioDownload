@@ -15,6 +15,8 @@ import pytest
 from yt_dlp_downloader import (
     DEFAULT_YT_DLP_AUDIO_FORMAT,
     DEFAULT_YT_DLP_OUTPUT_DIR,
+    DEFAULT_YT_DLP_RETRIES,
+    DEFAULT_YT_DLP_SOCKET_TIMEOUT,
     DEFAULT_YT_DLP_VIDEO_FORMAT,
     build_generic_task_id,
     build_yt_dlp_options,
@@ -102,7 +104,12 @@ class TestYtDlpOptions:
         options = build_yt_dlp_options(tmp_path, "ytdlp_abc", media_type="video")
         assert options["format"] == DEFAULT_YT_DLP_VIDEO_FORMAT
         assert "protocol^=m3u8" in options["format"]
+        assert "height<=360" in options["format"]
+        assert "tbr<=1000" in options["format"]
         assert options["merge_output_format"] == "mp4"
+        assert options["socket_timeout"] == DEFAULT_YT_DLP_SOCKET_TIMEOUT
+        assert options["retries"] == DEFAULT_YT_DLP_RETRIES
+        assert options["fragment_retries"] == DEFAULT_YT_DLP_RETRIES
 
     def test_build_options_rejects_unknown_media_type(self, tmp_path):
         with pytest.raises(ValueError, match="media_type"):
@@ -133,7 +140,7 @@ class TestHelpers:
 
 class TestDownloadYtDlpVideoResult:
     @patch("yt_dlp_downloader.load_yt_dlp_module", return_value=FakeYtDlpModule)
-    def test_download_returns_pipeline_compatible_result(self, _mock_loader, tmp_path):
+    def test_default_download_returns_mp4_video_result(self, _mock_loader, tmp_path):
         url = "https://example.com/watch?v=abc"
         task_id = "ytdlp_custom"
 
@@ -147,8 +154,8 @@ class TestDownloadYtDlpVideoResult:
         assert result.note_id == task_id
         assert result.note_url == url
         assert result.resolved_url == url
-        assert result.output_path.endswith("ytdlp_custom.mp3")
-        assert result.filename == "ytdlp_custom.mp3"
+        assert result.output_path.endswith("ytdlp_custom.mp4")
+        assert result.filename == "ytdlp_custom.mp4"
         assert result.codec == "h264"
         assert result.audio_codec == "aac"
         assert result.width == 1920
@@ -156,28 +163,41 @@ class TestDownloadYtDlpVideoResult:
         assert result.fps == 30
         assert result.avg_bitrate == 2_500_000
         assert result.size == 5
-        assert result.format == "mp3"
+        assert result.format == "mp4"
         assert Path(result.output_path).exists()
         assert FakeYoutubeDL.latest_options["quiet"] is True
+        assert FakeYoutubeDL.latest_options["format"] == DEFAULT_YT_DLP_VIDEO_FORMAT
+
+    @patch("yt_dlp_downloader.load_yt_dlp_module", return_value=FakeYtDlpModule)
+    def test_audio_mode_still_returns_mp3_result(self, _mock_loader, tmp_path):
+        result = download_yt_dlp_video_result(
+            video_url="https://example.com/watch?v=abc",
+            output_dir=tmp_path,
+            task_id="ytdlp_audio",
+            media_type="audio",
+            quiet=True,
+        )
+        assert result.output_path.endswith("ytdlp_audio.mp3")
+        assert result.format == "mp3"
         assert FakeYoutubeDL.latest_options["format"] == DEFAULT_YT_DLP_AUDIO_FORMAT
 
 
 class TestCliArguments:
-    def test_parse_cli_arguments_uses_default_output_dir(self):
+    def test_parse_cli_arguments_uses_default_output_dir_and_video_mode(self):
         video_url, output_dir, media_type = parse_cli_arguments([
             "yt_dlp_downloader.py",
             "https://example.com/video",
         ])
         assert video_url == "https://example.com/video"
         assert output_dir == DEFAULT_YT_DLP_OUTPUT_DIR
-        assert media_type == "audio"
+        assert media_type == "video"
 
     def test_parse_cli_arguments_keeps_explicit_output_dir(self):
         _, output_dir, media_type = parse_cli_arguments([
             "yt_dlp_downloader.py",
             "https://example.com/video",
             "./custom",
-            "video",
+            "audio",
         ])
         assert output_dir == "./custom"
-        assert media_type == "video"
+        assert media_type == "audio"

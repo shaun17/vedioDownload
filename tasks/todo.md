@@ -69,3 +69,21 @@
 - 验证结果：67 个测试全部通过。
 - 真实下载验证：`.venv/bin/python yt_dlp_downloader.py https://x.com/dachaoren/status/2033843657258766576 /tmp/vedioDownload-ytdlp-test`
 - 真实下载结果：选择 `hls-audio-128000-Audio`，成功输出 `/tmp/vedioDownload-ytdlp-test/ytdlp_23ed38b9d4b40408.mp3`。
+
+## 2026-04-21 yt-dlp MP4 视频模式修复
+
+- [x] 将 yt-dlp 默认模式恢复为 mp4 视频下载
+- [x] 保留 audio 模式用于只下载 mp3
+- [x] 修复 Twitter/X 视频模式避免选择 `http-2176` 大文件直连
+- [x] 补充测试并执行验证
+- [x] 记录最终 review
+
+## Review 2026-04-21 yt-dlp MP4 视频模式修复
+
+- 已将 `yt_dlp_downloader.py` 默认模式改为 `video`，默认输出 mp4；传入 `audio` 时仍然只提取 mp3。
+- 已将 `xhs_colab_pipeline.py` 的非小红书分支改为 `media_type="video"`，恢复“下载视频后再转录”的主路径。
+- 视频模式优先选择 HLS MP4；当 HLS 探测失败时，HTTP 兜底优先低码率/低分辨率 MP4，避免选中 `http-2176`。
+- 已增加 yt-dlp 的 socket timeout 和重试次数，降低 m3u8 信息和分片下载偶发超时的失败概率。
+- 验证证据：`.venv/bin/python -m pytest tests/test_xhs_downloader.py tests/test_xhs_colab_pipeline.py tests/test_yt_dlp_downloader.py`
+- 验证结果：68 个测试全部通过。
+- 格式选择验证：X 链接正常路径选择 `hls-553+hls-audio-128000-Audio`；HTTP 兜底路径选择 `http-256`，均未选择 `http-2176`。
