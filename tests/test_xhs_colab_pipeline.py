@@ -5,6 +5,7 @@ Colab 流水线的纯逻辑测试。
 只验证路径、配置解析和跳过逻辑是否正确。
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +29,19 @@ from xhs_colab_pipeline import (
     resolve_transcription_runtime,
     run_single_workflow,
 )
+
+
+def write_completed_metadata(task_dir: Path, transcript_text: str) -> None:
+    """写入最小成功转录元数据，和跳过判断需要的结构保持一致。"""
+    payload = {
+        "transcription": {
+            "text": transcript_text,
+        },
+    }
+    (task_dir / "metadata.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 class TestParseCookieJson:
@@ -84,7 +98,7 @@ class TestExistingDriveOutputs:
 
         (task_dir / "video.mp4").write_bytes(b"video")
         (task_dir / "transcript.txt").write_text("hello", encoding="utf-8")
-        (task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        write_completed_metadata(task_dir, "hello")
         assert has_existing_drive_outputs(task_dir) is True
 
     def test_audio_output_also_counts_as_existing_media(self, tmp_path):
@@ -92,9 +106,27 @@ class TestExistingDriveOutputs:
         task_dir.mkdir(parents=True)
         (task_dir / "audio.mp3").write_bytes(b"audio")
         (task_dir / "transcript.txt").write_text("hello", encoding="utf-8")
-        (task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        write_completed_metadata(task_dir, "hello")
         assert has_existing_drive_outputs(task_dir) is True
         assert find_existing_media_output(task_dir).name == "audio.mp3"
+
+    def test_empty_transcript_and_incomplete_metadata_are_not_existing_outputs(self, tmp_path):
+        task_dir = tmp_path / "drive" / "69d33c53000000001e00f5a3"
+        task_dir.mkdir(parents=True)
+        (task_dir / "video.mp4").write_bytes(b"video")
+        (task_dir / "transcript.txt").write_text("", encoding="utf-8")
+        (task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+
+        assert has_existing_drive_outputs(task_dir) is False
+
+    def test_incomplete_metadata_is_not_existing_output(self, tmp_path):
+        task_dir = tmp_path / "drive" / "69d33c53000000001e00f5a3"
+        task_dir.mkdir(parents=True)
+        (task_dir / "video.mp4").write_bytes(b"video")
+        (task_dir / "transcript.txt").write_text("已有文稿", encoding="utf-8")
+        (task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+
+        assert has_existing_drive_outputs(task_dir) is False
 
 
 class TestRenderPlainTranscript:
@@ -114,7 +146,7 @@ class TestRunSingleWorkflowSkip:
         drive_task_dir.mkdir(parents=True)
         (drive_task_dir / "video.mp4").write_bytes(b"video")
         (drive_task_dir / "transcript.txt").write_text("现有文稿", encoding="utf-8")
-        (drive_task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        write_completed_metadata(drive_task_dir, "现有文稿")
 
         result = run_single_workflow(
             note_url=f"https://www.xiaohongshu.com/explore/{note_id}",
@@ -132,7 +164,7 @@ class TestRunSingleWorkflowSkip:
         drive_task_dir.mkdir(parents=True)
         (drive_task_dir / "audio.mp3").write_bytes(b"audio")
         (drive_task_dir / "transcript.txt").write_text("现有通用文稿", encoding="utf-8")
-        (drive_task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        write_completed_metadata(drive_task_dir, "现有通用文稿")
 
         result = run_single_workflow(
             note_url=url,

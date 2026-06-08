@@ -186,20 +186,65 @@ def has_existing_drive_outputs(drive_task_dir: str | Path) -> bool:
     """
     检查 Drive 中是否已经存在完整产物。
 
-    只有同时存在媒体、文稿和元数据时，才认为这一条任务可以跳过。
+    只有媒体、文稿和元数据都是一次成功转录留下的有效结果时，
+    才认为这一条任务可以跳过。
     """
     task_dir = Path(drive_task_dir)
     if not task_dir.exists():
         return False
 
-    has_video = any(
-        path.exists()
-        for pattern in MEDIA_OUTPUT_PATTERNS
-        for path in task_dir.glob(pattern)
+    media_output = find_existing_media_output(task_dir)
+    transcript_path = task_dir / "transcript.txt"
+    metadata_path = task_dir / "metadata.json"
+    return (
+        is_existing_media_file(media_output)
+        and is_non_empty_text_file(transcript_path)
+        and is_valid_workflow_metadata_file(metadata_path, transcript_path)
     )
-    has_transcript = (task_dir / "transcript.txt").exists()
-    has_metadata = (task_dir / "metadata.json").exists()
-    return has_video and has_transcript and has_metadata
+
+
+def is_existing_media_file(file_path: str | Path) -> bool:
+    """判断媒体文件是否真实存在且不是空文件。"""
+    path = Path(file_path)
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def is_non_empty_text_file(file_path: str | Path) -> bool:
+    """判断文本文件是否存在且包含实际内容。"""
+    path = Path(file_path)
+    if not path.exists() or not path.is_file():
+        return False
+    return bool(path.read_text(encoding="utf-8").strip())
+
+
+def is_valid_workflow_metadata_file(
+    metadata_path: str | Path,
+    transcript_path: str | Path,
+) -> bool:
+    """校验元数据是否来自成功转录，并和文稿文件内容一致。"""
+    path = Path(metadata_path)
+    if not path.exists() or not path.is_file():
+        return False
+
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(metadata, dict):
+        return False
+
+    transcription = metadata.get("transcription")
+    if not isinstance(transcription, dict):
+        return False
+
+    try:
+        transcript_text = Path(transcript_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+
+    metadata_text = str(transcription.get("text") or "").strip()
+    return bool(metadata_text) and metadata_text == transcript_text
 
 
 def find_existing_media_output(task_dir: str | Path) -> Path:
