@@ -1,8 +1,8 @@
 """
-Colab 小红书视频下载与转录流水线。
+Colab 多平台视频下载与转录流水线。
 
 设计目标：
-  1. 复用现有下载器，不重写小红书抓取逻辑
+  1. 复用现有下载器，不重写平台抓取逻辑
   2. 所有中间处理都在 Colab 本地临时目录完成
   3. 最终只把视频、文稿、元数据保存到 Google Drive
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
 
+from douyin_downloader import build_douyin_task_id, download_douyin_video_result
 from xhs_downloader import (
     VideoDownloadResult,
     download_xhs_video_result,
@@ -30,7 +31,11 @@ from yt_dlp_downloader import build_generic_task_id, download_yt_dlp_video_resul
 
 DEFAULT_LOCAL_ROOT = Path("/content/xhs_workspace")
 DEFAULT_DRIVE_ROOT = Path("/content/drive/MyDrive/xhs_outputs")
+PLATFORM_XIAOHONGSHU = "xiaohongshu"
+PLATFORM_DOUYIN = "douyin"
+PLATFORM_GENERIC = "generic"
 XIAOHONGSHU_DOMAINS = ("xiaohongshu.com", "xhslink.com")
+DOUYIN_DOMAINS = ("douyin.com", "iesdouyin.com", "amemv.com")
 MEDIA_OUTPUT_PATTERNS = ("*.mp4", "*.mp3", "*.m4a", "*.webm", "*.mov")
 
 
@@ -72,6 +77,15 @@ class WorkflowResult:
     metadata_path: str
     transcript_preview: str
     error: str = ""
+
+
+@dataclass(frozen=True)
+class WorkflowIdentity:
+    """封装 URL 在流水线中的平台、解析后 URL 和稳定任务 ID。"""
+
+    resolved_url: str
+    task_id: str
+    platform: str
 
 
 def parse_cookie_json(cookies_json: str | None) -> dict:
@@ -133,30 +147,55 @@ def resolve_transcription_runtime(has_cuda: bool) -> tuple[str, str]:
     return "cpu", "int8"
 
 
-def is_xiaohongshu_url(video_url: str) -> bool:
-    """判断 URL 是否应使用小红书专用下载器处理。"""
+def is_host_in_domains(video_url: str, domains: tuple[str, ...]) -> bool:
+    """判断 URL host 是否命中指定平台域名列表。"""
     host = urlparse(video_url.replace("\\", "")).hostname or ""
     normalized_host = host.lower()
     return any(
         normalized_host == domain or normalized_host.endswith(f".{domain}")
-        for domain in XIAOHONGSHU_DOMAINS
+        for domain in domains
     )
 
 
-def resolve_workflow_identity(video_url: str) -> tuple[str, str, bool]:
+def is_xiaohongshu_url(video_url: str) -> bool:
+    """判断 URL 是否应使用小红书专用下载器处理。"""
+    return is_host_in_domains(video_url, XIAOHONGSHU_DOMAINS)
+
+
+def is_douyin_url(video_url: str) -> bool:
+    """判断 URL 是否属于抖音平台。"""
+    return is_host_in_domains(video_url, DOUYIN_DOMAINS)
+
+
+def resolve_workflow_identity(video_url: str) -> WorkflowIdentity:
     """
     解析流水线任务身份。
 
-    小红书使用真实 note_id；其他站点使用 URL hash，避免非小红书链接
-    在 parse_note_url 阶段失败。
+    小红书使用真实 note_id；抖音优先使用视频 ID；其他站点使用 URL hash，
+    避免非小红书链接在 parse_note_url 阶段失败。
     """
-    normalized_url = video_url.strip()
+    normalized_url = video_url.replace("\\", "").strip()
     if is_xiaohongshu_url(normalized_url):
         resolved_url = resolve_note_url(normalized_url)
         note_id, _, _ = parse_note_url(resolved_url)
-        return resolved_url, note_id, True
+        return WorkflowIdentity(
+            resolved_url=resolved_url,
+            task_id=note_id,
+            platform=PLATFORM_XIAOHONGSHU,
+        )
 
-    return normalized_url, build_generic_task_id(normalized_url), False
+    if is_douyin_url(normalized_url):
+        return WorkflowIdentity(
+            resolved_url=normalized_url,
+            task_id=build_douyin_task_id(normalized_url),
+            platform=PLATFORM_DOUYIN,
+        )
+
+    return WorkflowIdentity(
+        resolved_url=normalized_url,
+        task_id=build_generic_task_id(normalized_url),
+        platform=PLATFORM_GENERIC,
+    )
 
 
 def build_workflow_paths(
@@ -329,15 +368,16 @@ def prepare_transcription_audio(
     video_url: str,
     download_result: VideoDownloadResult,
     paths: WorkflowPaths,
-    is_xiaohongshu: bool,
+    platform: str,
+    cookies: dict | None = None,
 ) -> str:
     """
     准备给 Whisper 使用的转录音频。
 
-    小红书继续从已下载视频抽取 WAV；通用链接额外用 yt-dlp 直接提取
-    MP3，避免从合并后的 MP4 再抽音频导致转录质量下降。
+    小红书和抖音从已下载视频抽取 WAV；通用链接额外用 yt-dlp
+    直接提取 MP3，避免部分站点合并后的 MP4 再抽音频导致转录质量下降。
     """
-    if is_xiaohongshu:
+    if platform in {PLATFORM_XIAOHONGSHU, PLATFORM_DOUYIN}:
         return extract_audio_track(download_result.output_path, paths.local_audio_path)
 
     audio_result = download_yt_dlp_video_result(
@@ -345,6 +385,7 @@ def prepare_transcription_audio(
         output_dir=paths.local_task_dir,
         task_id=f"{paths.note_id}_transcription_audio",
         media_type="audio",
+        cookies=cookies,
     )
     return audio_result.output_path
 
@@ -459,9 +500,11 @@ def build_workflow_metadata(
     download_result: VideoDownloadResult,
     transcription_result: TranscriptionResult,
     paths: WorkflowPaths,
+    platform: str,
 ) -> dict:
     """构建单条任务的元数据文件内容。"""
     return {
+        "platform": platform,
         "note_id": download_result.note_id,
         "note_url": download_result.note_url,
         "resolved_url": download_result.resolved_url,
@@ -479,7 +522,7 @@ def build_workflow_metadata(
 def download_video_for_workflow(
     video_url: str,
     paths: WorkflowPaths,
-    is_xiaohongshu: bool,
+    platform: str,
     cookies: dict | None = None,
     prefer_codec: str = "hevc",
     quality_index: int = 0,
@@ -487,10 +530,10 @@ def download_video_for_workflow(
     """
     按来源选择下载器。
 
-    小红书继续复用现有签名流解析；其他域名交给 yt-dlp，
-    但输出目录仍然使用流水线已有 Drive 目录。
+    小红书继续复用现有签名流解析；抖音走 share 页路由数据解析；
+    其他域名交给 yt-dlp。所有下载器都复用流水线已有 Drive 目录。
     """
-    if is_xiaohongshu:
+    if platform == PLATFORM_XIAOHONGSHU:
         return download_xhs_video_result(
             note_url=video_url,
             output_dir=paths.drive_video_dir,
@@ -499,18 +542,27 @@ def download_video_for_workflow(
             cookies=cookies,
         )
 
+    if platform == PLATFORM_DOUYIN:
+        return download_douyin_video_result(
+            video_url=video_url,
+            output_dir=paths.drive_video_dir,
+            task_id=paths.note_id,
+        )
+
     return download_yt_dlp_video_result(
         video_url=video_url,
         output_dir=paths.drive_video_dir,
         task_id=paths.note_id,
         media_type="video",
+        cookies=cookies,
     )
 
 
 def build_failed_workflow_result(note_url: str, error: Exception) -> WorkflowResult:
     """构建失败结果，确保非小红书 URL 失败时也不会再次触发 note_id 解析错误。"""
     try:
-        _, task_id, _ = resolve_workflow_identity(note_url)
+        identity = resolve_workflow_identity(note_url)
+        task_id = identity.task_id
     except Exception:
         task_id = build_generic_task_id(note_url)
 
@@ -544,15 +596,19 @@ def run_single_workflow(
     执行单条 URL 的完整工作流。
 
     流程固定为：
-      1. 解析 note_id
+      1. 解析平台身份和任务 ID
       2. 检查 Drive 中是否已有结果
       3. 下载最终媒体文件
       4. 准备高质量音频并执行转录
       5. 将最终结果复制到 Drive
     """
-    resolved_url, note_id, is_xiaohongshu = resolve_workflow_identity(note_url)
-    runtime_cookies = merge_cookies(cookies) if is_xiaohongshu else {}
-    paths = build_workflow_paths(note_id=note_id, local_root=local_root, drive_root=drive_root)
+    identity = resolve_workflow_identity(note_url)
+    runtime_cookies = merge_cookies(cookies) if identity.platform == PLATFORM_XIAOHONGSHU else (cookies or {})
+    paths = build_workflow_paths(
+        note_id=identity.task_id,
+        local_root=local_root,
+        drive_root=drive_root,
+    )
 
     if skip_existing and has_existing_drive_outputs(paths.drive_task_dir):
         drive_dir = Path(paths.drive_task_dir)
@@ -562,7 +618,7 @@ def run_single_workflow(
         if transcript_path.exists():
             preview = transcript_path.read_text(encoding="utf-8")[:120]
         return WorkflowResult(
-            note_id=note_id,
+            note_id=identity.task_id,
             note_url=note_url,
             status="skipped",
             video_path=str(existing_video),
@@ -575,18 +631,19 @@ def run_single_workflow(
     Path(paths.drive_task_dir).mkdir(parents=True, exist_ok=True)
 
     download_result = download_video_for_workflow(
-        video_url=resolved_url,
+        video_url=identity.resolved_url,
         paths=paths,
-        is_xiaohongshu=is_xiaohongshu,
+        platform=identity.platform,
         cookies=runtime_cookies,
         prefer_codec=prefer_codec,
         quality_index=quality_index,
     )
     transcription_audio_path = prepare_transcription_audio(
-        video_url=resolved_url,
+        video_url=identity.resolved_url,
         download_result=download_result,
         paths=paths,
-        is_xiaohongshu=is_xiaohongshu,
+        platform=identity.platform,
+        cookies=runtime_cookies,
     )
     transcription_result = transcribe_with_faster_whisper(
         audio_path=transcription_audio_path,
@@ -598,14 +655,19 @@ def run_single_workflow(
     )
 
     write_text_file(paths.drive_transcript_path, transcription_result.text)
-    metadata = build_workflow_metadata(download_result, transcription_result, paths)
+    metadata = build_workflow_metadata(
+        download_result,
+        transcription_result,
+        paths,
+        identity.platform,
+    )
     write_json_file(paths.drive_metadata_path, metadata)
 
     # 音频只是中间文件，复制完成后删除可减少 Colab 临时盘占用。
     cleanup_local_transcription_audio(transcription_audio_path, paths.local_task_dir)
 
     return WorkflowResult(
-        note_id=note_id,
+        note_id=identity.task_id,
         note_url=note_url,
         status="success",
         video_path=download_result.output_path,
@@ -638,7 +700,7 @@ def run_colab_workflow(
     """
     urls = normalize_note_urls(note_urls)
     if not urls:
-        raise ValueError("至少需要提供一条小红书 URL")
+        raise ValueError("至少需要提供一条视频 URL")
 
     if mount_drive:
         mount_google_drive(force_remount=force_remount)
@@ -673,8 +735,8 @@ def load_urls_from_file(file_path: str | Path) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，方便在 Colab 里直接 `!python` 运行。"""
-    parser = argparse.ArgumentParser(description="Colab 小红书视频下载与转录流水线")
-    parser.add_argument("--url", action="append", default=[], help="小红书笔记 URL，可重复传入")
+    parser = argparse.ArgumentParser(description="Colab 多平台视频下载与转录流水线")
+    parser.add_argument("--url", action="append", default=[], help="视频 URL，可重复传入")
     parser.add_argument("--url-file", help="包含多个 URL 的文本文件，每行一条")
     parser.add_argument("--cookies-json", help="运行时注入的 Cookie JSON 字符串")
     parser.add_argument("--drive-root", default=str(DEFAULT_DRIVE_ROOT), help="Drive 输出根目录")

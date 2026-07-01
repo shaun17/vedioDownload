@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import importlib
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from xhs_downloader import VideoDownloadResult
 
@@ -35,6 +37,7 @@ DEFAULT_YT_DLP_VIDEO_FORMAT = (
 )
 DEFAULT_YT_DLP_SOCKET_TIMEOUT = 60
 DEFAULT_YT_DLP_RETRIES = 10
+YT_DLP_COOKIE_BASE_DOMAINS = ("douyin.com", "iesdouyin.com", "amemv.com")
 
 
 def build_generic_task_id(video_url: str) -> str:
@@ -60,11 +63,64 @@ def load_yt_dlp_module():
         ) from error
 
 
+def normalize_cookie_file_field(value: Any) -> str:
+    """清理 cookie 文件字段，避免 tab 或换行破坏 Netscape cookie 格式。"""
+    return str(value).replace("\t", " ").replace("\n", " ").strip()
+
+
+def resolve_cookie_domain(video_url: str) -> str:
+    """根据视频 URL 选择 cookie domain，抖音类域名统一写到主域。"""
+    host = (urlparse(video_url.replace("\\", "").strip()).hostname or "").lower()
+    if not host:
+        raise ValueError("无法从视频 URL 解析 cookie 域名")
+
+    for domain in YT_DLP_COOKIE_BASE_DOMAINS:
+        if host == domain or host.endswith(f".{domain}"):
+            return f".{domain}"
+    return host
+
+
+def build_netscape_cookie_file_text(video_url: str, cookies: dict | None) -> str:
+    """把运行时 cookie 字典转换成 yt-dlp 可读取的 Netscape cookie 文件内容。"""
+    domain = resolve_cookie_domain(video_url)
+    lines = ["# Netscape HTTP Cookie File", ""]
+    for raw_name, raw_value in (cookies or {}).items():
+        name = normalize_cookie_file_field(raw_name)
+        value = normalize_cookie_file_field(raw_value)
+        if not name or not value:
+            continue
+        lines.append(f"{domain}\tTRUE\t/\tTRUE\t0\t{name}\t{value}")
+    return "\n".join(lines) + "\n"
+
+
+def write_temporary_cookie_file(video_url: str, cookies: dict | None) -> Path | None:
+    """将 cookie 写入临时文件；没有有效 cookie 时返回 None。"""
+    valid_cookies = {
+        normalize_cookie_file_field(name): normalize_cookie_file_field(value)
+        for name, value in (cookies or {}).items()
+        if normalize_cookie_file_field(name) and normalize_cookie_file_field(value)
+    }
+    if not valid_cookies:
+        return None
+
+    cookie_text = build_netscape_cookie_file_text(video_url, valid_cookies)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="yt_dlp_cookies_",
+        suffix=".txt",
+        delete=False,
+    ) as cookie_file:
+        cookie_file.write(cookie_text)
+        return Path(cookie_file.name)
+
+
 def build_yt_dlp_options(
     output_dir: str | Path,
     task_id: str,
     media_type: str = "video",
     quiet: bool = False,
+    cookiefile: str | Path | None = None,
 ) -> dict[str, Any]:
     """构建 yt-dlp 下载参数，统一输出文件名和音视频下载模式。"""
     if media_type not in {"audio", "video"}:
@@ -84,6 +140,9 @@ def build_yt_dlp_options(
         "quiet": quiet,
         "no_warnings": quiet,
     }
+    if cookiefile:
+        options["cookiefile"] = str(cookiefile)
+
     if media_type == "audio":
         options["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
@@ -184,22 +243,29 @@ def download_yt_dlp_video_result(
     task_id: str | None = None,
     media_type: str = "video",
     quiet: bool = False,
+    cookies: dict | None = None,
 ) -> VideoDownloadResult:
     """使用 yt-dlp 下载媒体，并返回兼容 Colab 流水线的结果对象。"""
     runtime_task_id = task_id or build_generic_task_id(video_url)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     yt_dlp = load_yt_dlp_module()
-    options = build_yt_dlp_options(
-        output_dir,
-        runtime_task_id,
-        media_type=media_type,
-        quiet=quiet,
-    )
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(video_url, download=True)
-        sanitized_info = ydl.sanitize_info(info)
-        prepared_path = ydl.prepare_filename(info)
+    cookiefile = write_temporary_cookie_file(video_url, cookies)
+    try:
+        options = build_yt_dlp_options(
+            output_dir,
+            runtime_task_id,
+            media_type=media_type,
+            quiet=quiet,
+            cookiefile=cookiefile,
+        )
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            sanitized_info = ydl.sanitize_info(info)
+            prepared_path = ydl.prepare_filename(info)
+    finally:
+        if cookiefile:
+            cookiefile.unlink(missing_ok=True)
 
     output_path = resolve_downloaded_file(
         output_dir=output_dir,

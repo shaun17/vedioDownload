@@ -19,6 +19,7 @@ from yt_dlp_downloader import (
     DEFAULT_YT_DLP_SOCKET_TIMEOUT,
     DEFAULT_YT_DLP_VIDEO_FORMAT,
     build_generic_task_id,
+    build_netscape_cookie_file_text,
     build_yt_dlp_options,
     download_yt_dlp_video_result,
     load_yt_dlp_module,
@@ -32,10 +33,15 @@ class FakeYoutubeDL:
     """模拟 yt-dlp 的上下文管理器和核心下载 API。"""
 
     latest_options = None
+    latest_cookiefile_text = None
 
     def __init__(self, options):
         self.options = options
         FakeYoutubeDL.latest_options = options
+        cookiefile = options.get("cookiefile")
+        FakeYoutubeDL.latest_cookiefile_text = (
+            Path(cookiefile).read_text(encoding="utf-8") if cookiefile else None
+        )
         extension = "mp3" if "postprocessors" in options else "mp4"
         self.output_path = Path(options["outtmpl"]["default"].replace("%(ext)s", extension))
 
@@ -90,6 +96,15 @@ class TestGenericTaskId:
 
 
 class TestYtDlpOptions:
+    def test_build_cookie_file_text_uses_douyin_domain_and_ignores_empty_values(self):
+        text = build_netscape_cookie_file_text(
+            "https://www.douyin.com/video/7646960381037995690",
+            {"s_v_web_id": "fresh-cookie", "empty": ""},
+        )
+        assert "# Netscape HTTP Cookie File" in text
+        assert ".douyin.com\tTRUE\t/\tTRUE\t0\ts_v_web_id\tfresh-cookie" in text
+        assert "empty" not in text
+
     def test_build_audio_options_extracts_mp3_and_uses_stable_filename(self, tmp_path):
         options = build_yt_dlp_options(tmp_path, "ytdlp_abc", media_type="audio", quiet=True)
         assert options["format"] == DEFAULT_YT_DLP_AUDIO_FORMAT
@@ -181,6 +196,25 @@ class TestDownloadYtDlpVideoResult:
         assert result.format == "mp3"
         assert FakeYoutubeDL.latest_options["format"] == DEFAULT_YT_DLP_AUDIO_FORMAT
 
+    @patch("yt_dlp_downloader.load_yt_dlp_module", return_value=FakeYtDlpModule)
+    def test_download_passes_runtime_cookies_through_temporary_cookiefile(
+        self,
+        _mock_loader,
+        tmp_path,
+    ):
+        result = download_yt_dlp_video_result(
+            video_url="https://www.douyin.com/video/7646960381037995690",
+            output_dir=tmp_path,
+            task_id="douyin_7646960381037995690",
+            cookies={"s_v_web_id": "fresh-cookie"},
+            quiet=True,
+        )
+
+        cookiefile = Path(FakeYoutubeDL.latest_options["cookiefile"])
+        assert result.note_id == "douyin_7646960381037995690"
+        assert FakeYoutubeDL.latest_cookiefile_text is not None
+        assert "s_v_web_id\tfresh-cookie" in FakeYoutubeDL.latest_cookiefile_text
+        assert cookiefile.exists() is False
 
 class TestCliArguments:
     def test_parse_cli_arguments_uses_default_output_dir_and_video_mode(self):

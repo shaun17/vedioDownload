@@ -21,6 +21,7 @@ from xhs_colab_pipeline import (
     build_workflow_paths,
     find_existing_media_output,
     has_existing_drive_outputs,
+    is_douyin_url,
     is_xiaohongshu_url,
     normalize_note_urls,
     parse_cookie_json,
@@ -177,6 +178,27 @@ class TestRunSingleWorkflowSkip:
         assert result.video_path.endswith("audio.mp3")
         assert result.transcript_preview == "现有通用文稿"
 
+    def test_existing_douyin_outputs_are_skipped_with_douyin_task_id(self, tmp_path):
+        url = "https://www.douyin.com/video/7646960381037995690"
+        task_id = "douyin_7646960381037995690"
+        drive_task_dir = tmp_path / "drive" / task_id
+        drive_task_dir.mkdir(parents=True)
+        (drive_task_dir / f"{task_id}.mp4").write_bytes(b"video")
+        (drive_task_dir / "transcript.txt").write_text("现有抖音文稿", encoding="utf-8")
+        write_completed_metadata(drive_task_dir, "现有抖音文稿")
+
+        result = run_single_workflow(
+            note_url=url,
+            drive_root=tmp_path / "drive",
+            local_root=tmp_path / "local",
+            skip_existing=True,
+        )
+
+        assert result.status == "skipped"
+        assert result.note_id == task_id
+        assert result.video_path.endswith(f"{task_id}.mp4")
+        assert result.transcript_preview == "现有抖音文稿"
+
 
 class TestWorkflowIdentity:
     def test_xiaohongshu_domains_use_xhs_downloader(self):
@@ -184,12 +206,31 @@ class TestWorkflowIdentity:
         assert is_xiaohongshu_url("https://xhslink.com/a/b") is True
         assert is_xiaohongshu_url("https://example.com/watch?v=abc") is False
 
+    def test_douyin_domains_use_douyin_platform(self):
+        assert is_douyin_url("https://www.douyin.com/video/7646960381037995690") is True
+        assert is_douyin_url("https://v.douyin.com/abc123") is True
+        assert is_douyin_url("https://example.com/watch?v=abc") is False
+
     def test_generic_identity_uses_stable_hash_id(self):
         url = "https://example.com/watch?v=abc"
-        resolved_url, task_id, is_xhs = resolve_workflow_identity(url)
-        assert resolved_url == url
-        assert task_id == build_generic_task_id(url)
-        assert is_xhs is False
+        identity = resolve_workflow_identity(url)
+        assert identity.resolved_url == url
+        assert identity.task_id == build_generic_task_id(url)
+        assert identity.platform == "generic"
+
+    def test_douyin_identity_uses_video_id_when_present(self):
+        url = "https://www.douyin.com/video/7646960381037995690"
+        identity = resolve_workflow_identity(url)
+        assert identity.resolved_url == url
+        assert identity.task_id == "douyin_7646960381037995690"
+        assert identity.platform == "douyin"
+
+    def test_douyin_identity_keeps_platform_prefix_for_short_links(self):
+        url = "https://v.douyin.com/abc123/"
+        identity = resolve_workflow_identity(url)
+        assert identity.resolved_url == url
+        assert identity.task_id.startswith("douyin_")
+        assert identity.platform == "douyin"
 
 
 class TestRunSingleWorkflowRouting:
@@ -275,6 +316,73 @@ class TestRunSingleWorkflowRouting:
         assert audio_call.kwargs["media_type"] == "audio"
         mock_extract_audio.assert_not_called()
         mock_transcribe.assert_called_once()
+        assert mock_transcribe.call_args.kwargs["audio_path"] == str(audio_path)
+
+    @patch("xhs_colab_pipeline.transcribe_with_faster_whisper")
+    @patch("xhs_colab_pipeline.extract_audio_track")
+    @patch("xhs_colab_pipeline.download_douyin_video_result")
+    @patch("xhs_colab_pipeline.download_xhs_video_result")
+    @patch("xhs_colab_pipeline.download_yt_dlp_video_result")
+    def test_douyin_url_uses_share_page_downloader_and_writes_platform_metadata(
+        self,
+        mock_yt_dlp_download,
+        mock_xhs_download,
+        mock_douyin_download,
+        mock_extract_audio,
+        mock_transcribe,
+        tmp_path,
+    ):
+        url = "https://www.douyin.com/video/7646960381037995690"
+        task_id = "douyin_7646960381037995690"
+        video_path = tmp_path / "drive" / task_id / f"{task_id}.mp4"
+        audio_path = tmp_path / "local" / task_id / "audio.wav"
+        mock_douyin_download.return_value = VideoDownloadResult(
+            note_id=task_id,
+            note_url=url,
+            resolved_url=f"https://www.douyin.com/share/video/7646960381037995690/",
+            output_path=str(video_path),
+            filename=video_path.name,
+            codec="h264",
+            audio_codec="aac",
+            width=1080,
+            height=1920,
+            fps=30,
+            avg_bitrate=1_000_000,
+            size=1024,
+            format="mp4",
+            quality_index=0,
+        )
+        mock_extract_audio.return_value = str(audio_path)
+        mock_transcribe.return_value = TranscriptionResult(
+            text="抖音视频文稿",
+            language="zh",
+            language_probability=1.0,
+            model_name="turbo",
+            device="cpu",
+            compute_type="int8",
+            segments=[{"text": "抖音视频文稿"}],
+        )
+
+        result = run_single_workflow(
+            note_url=url,
+            drive_root=tmp_path / "drive",
+            local_root=tmp_path / "local",
+            skip_existing=False,
+        )
+
+        metadata = json.loads(Path(result.metadata_path).read_text(encoding="utf-8"))
+        assert result.status == "success"
+        assert result.note_id == task_id
+        assert metadata["platform"] == "douyin"
+        assert metadata["note_id"] == task_id
+        mock_xhs_download.assert_not_called()
+        mock_yt_dlp_download.assert_not_called()
+        mock_douyin_download.assert_called_once()
+        assert mock_douyin_download.call_args.kwargs["video_url"] == url
+        assert mock_douyin_download.call_args.kwargs["task_id"] == task_id
+        assert mock_douyin_download.call_args.kwargs["output_dir"].endswith(task_id)
+        mock_extract_audio.assert_called_once()
+        assert mock_extract_audio.call_args.args == (str(video_path), str(audio_path))
         assert mock_transcribe.call_args.kwargs["audio_path"] == str(audio_path)
 
     @patch("xhs_colab_pipeline.transcribe_with_faster_whisper")
