@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from xhs_downloader import VideoDownloadResult
 
@@ -38,6 +38,8 @@ DEFAULT_YT_DLP_VIDEO_FORMAT = (
 DEFAULT_YT_DLP_SOCKET_TIMEOUT = 60
 DEFAULT_YT_DLP_RETRIES = 10
 YT_DLP_COOKIE_BASE_DOMAINS = ("douyin.com", "iesdouyin.com", "amemv.com")
+TIKTOK_DOMAINS = ("tiktok.com", "tiktokv.com")
+TIKTOK_VIDEO_QUERY_KEYS = ("item_id", "video_id")
 
 
 def build_generic_task_id(video_url: str) -> str:
@@ -45,6 +47,61 @@ def build_generic_task_id(video_url: str) -> str:
     normalized_url = video_url.strip()
     digest = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()[:16]
     return f"ytdlp_{digest}"
+
+
+def is_host_in_domains(video_url: str, domains: tuple[str, ...]) -> bool:
+    """判断 URL host 是否命中指定域名列表，统一处理 shell 粘贴带入的反斜杠。"""
+    host = (urlparse(video_url.replace("\\", "").strip()).hostname or "").lower()
+    return any(host == domain or host.endswith(f".{domain}") for domain in domains)
+
+
+def is_tiktok_url(video_url: str) -> bool:
+    """判断 URL 是否属于 TikTok，供流水线和 cookie 策略共用。"""
+    return is_host_in_domains(video_url, TIKTOK_DOMAINS)
+
+
+def extract_tiktok_video_id(video_url: str) -> str:
+    """从常见 TikTok 视频 URL 中提取数字视频 ID。"""
+    normalized_url = video_url.replace("\\", "").strip()
+    parsed_url = urlparse(normalized_url)
+    query_values = parse_qs(parsed_url.query)
+
+    for key in TIKTOK_VIDEO_QUERY_KEYS:
+        values = query_values.get(key) or []
+        for value in values:
+            candidate = value.strip()
+            if candidate.isdigit():
+                return candidate
+
+    path_parts = [part for part in parsed_url.path.split("/") if part]
+    for marker in ("video", "v"):
+        if marker not in path_parts:
+            continue
+        marker_index = path_parts.index(marker)
+        if marker_index + 1 >= len(path_parts):
+            continue
+        candidate = path_parts[marker_index + 1].removesuffix(".html").strip()
+        if candidate.isdigit():
+            return candidate
+
+    raise ValueError(f"无法从 URL 中提取 TikTok 视频 ID: {video_url!r}")
+
+
+def build_tiktok_task_id(video_url: str) -> str:
+    """构建 TikTok 任务 ID；短链没有视频 ID 时回退到稳定 hash。"""
+    normalized_url = video_url.replace("\\", "").strip()
+    try:
+        return f"tiktok_{extract_tiktok_video_id(normalized_url)}"
+    except ValueError:
+        digest = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()[:16]
+        return f"tiktok_{digest}"
+
+
+def build_default_task_id(video_url: str) -> str:
+    """根据平台构建默认任务 ID，未知平台继续使用通用 hash。"""
+    if is_tiktok_url(video_url):
+        return build_tiktok_task_id(video_url)
+    return build_generic_task_id(video_url)
 
 
 def load_yt_dlp_module():
@@ -113,6 +170,18 @@ def write_temporary_cookie_file(video_url: str, cookies: dict | None) -> Path | 
     ) as cookie_file:
         cookie_file.write(cookie_text)
         return Path(cookie_file.name)
+
+
+def resolve_ytdlp_runtime_cookies(video_url: str, cookies: dict | None) -> dict:
+    """
+    解析 yt-dlp 实际使用的运行时 cookie。
+
+    TikTok 公开视频走 yt-dlp 自身的匿名网页/API路径；外部传入的 cookie
+    往往来自小红书或其他平台，不能被改写成 TikTok cookiefile。
+    """
+    if is_tiktok_url(video_url):
+        return {}
+    return cookies or {}
 
 
 def build_yt_dlp_options(
@@ -246,11 +315,12 @@ def download_yt_dlp_video_result(
     cookies: dict | None = None,
 ) -> VideoDownloadResult:
     """使用 yt-dlp 下载媒体，并返回兼容 Colab 流水线的结果对象。"""
-    runtime_task_id = task_id or build_generic_task_id(video_url)
+    runtime_task_id = task_id or build_default_task_id(video_url)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     yt_dlp = load_yt_dlp_module()
-    cookiefile = write_temporary_cookie_file(video_url, cookies)
+    runtime_cookies = resolve_ytdlp_runtime_cookies(video_url, cookies)
+    cookiefile = write_temporary_cookie_file(video_url, runtime_cookies)
     try:
         options = build_yt_dlp_options(
             output_dir,

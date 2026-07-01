@@ -18,10 +18,12 @@ from xhs_downloader import VideoDownloadResult
 from xhs_colab_pipeline import (
     TranscriptionResult,
     build_generic_task_id,
+    build_tiktok_task_id,
     build_workflow_paths,
     find_existing_media_output,
     has_existing_drive_outputs,
     is_douyin_url,
+    is_tiktok_url,
     is_xiaohongshu_url,
     normalize_note_urls,
     parse_cookie_json,
@@ -211,6 +213,11 @@ class TestWorkflowIdentity:
         assert is_douyin_url("https://v.douyin.com/abc123") is True
         assert is_douyin_url("https://example.com/watch?v=abc") is False
 
+    def test_tiktok_domains_use_tiktok_platform(self):
+        assert is_tiktok_url("https://www.tiktok.com/@theoffice/video/7637558012294483214") is True
+        assert is_tiktok_url("https://m.tiktok.com/v/7637558012294483214.html") is True
+        assert is_tiktok_url("https://example.com/watch?v=abc") is False
+
     def test_generic_identity_uses_stable_hash_id(self):
         url = "https://example.com/watch?v=abc"
         identity = resolve_workflow_identity(url)
@@ -231,6 +238,23 @@ class TestWorkflowIdentity:
         assert identity.resolved_url == url
         assert identity.task_id.startswith("douyin_")
         assert identity.platform == "douyin"
+
+    def test_tiktok_identity_uses_video_id_when_present(self):
+        url = (
+            "https://www.tiktok.com/@theoffice/video/7637558012294483214"
+            "?is_from_webapp=1&sender_device=pc"
+        )
+        identity = resolve_workflow_identity(url)
+        assert identity.resolved_url == url
+        assert identity.task_id == "tiktok_7637558012294483214"
+        assert identity.platform == "tiktok"
+
+    def test_tiktok_identity_keeps_platform_prefix_for_short_links(self):
+        url = "https://vm.tiktok.com/ZTR45GpSF/"
+        identity = resolve_workflow_identity(url)
+        assert identity.resolved_url == url
+        assert identity.task_id == build_tiktok_task_id(url)
+        assert identity.platform == "tiktok"
 
 
 class TestRunSingleWorkflowRouting:
@@ -383,6 +407,93 @@ class TestRunSingleWorkflowRouting:
         assert mock_douyin_download.call_args.kwargs["output_dir"].endswith(task_id)
         mock_extract_audio.assert_called_once()
         assert mock_extract_audio.call_args.args == (str(video_path), str(audio_path))
+        assert mock_transcribe.call_args.kwargs["audio_path"] == str(audio_path)
+
+    @patch("xhs_colab_pipeline.transcribe_with_faster_whisper")
+    @patch("xhs_colab_pipeline.extract_audio_track")
+    @patch("xhs_colab_pipeline.download_xhs_video_result")
+    @patch("xhs_colab_pipeline.download_yt_dlp_video_result")
+    def test_tiktok_url_uses_yt_dlp_without_runtime_cookies_and_writes_platform_metadata(
+        self,
+        mock_yt_dlp_download,
+        mock_xhs_download,
+        mock_extract_audio,
+        mock_transcribe,
+        tmp_path,
+    ):
+        url = (
+            "https://www.tiktok.com/@theoffice/video/7637558012294483214"
+            "?is_from_webapp=1&sender_device=pc"
+        )
+        task_id = "tiktok_7637558012294483214"
+        video_path = tmp_path / "drive" / task_id / f"{task_id}.mp4"
+        audio_path = tmp_path / "local" / task_id / f"{task_id}_transcription_audio.mp3"
+        video_result = VideoDownloadResult(
+            note_id=task_id,
+            note_url=url,
+            resolved_url=url,
+            output_path=str(video_path),
+            filename=video_path.name,
+            codec="h264",
+            audio_codec="aac",
+            width=1080,
+            height=1920,
+            fps=30,
+            avg_bitrate=1_000_000,
+            size=1024,
+            format="mp4",
+            quality_index=0,
+        )
+        audio_result = VideoDownloadResult(
+            note_id=f"{task_id}_transcription_audio",
+            note_url=url,
+            resolved_url=url,
+            output_path=str(audio_path),
+            filename=audio_path.name,
+            codec="none",
+            audio_codec="mp3",
+            width=0,
+            height=0,
+            fps=0,
+            avg_bitrate=128_000,
+            size=512,
+            format="mp3",
+            quality_index=0,
+        )
+        mock_yt_dlp_download.side_effect = [video_result, audio_result]
+        mock_transcribe.return_value = TranscriptionResult(
+            text="TikTok 视频文稿",
+            language="en",
+            language_probability=1.0,
+            model_name="turbo",
+            device="cpu",
+            compute_type="int8",
+            segments=[{"text": "TikTok 视频文稿"}],
+        )
+
+        result = run_single_workflow(
+            note_url=url,
+            cookies={"a1": "xhs-token", "web_session": "xhs-session"},
+            drive_root=tmp_path / "drive",
+            local_root=tmp_path / "local",
+            skip_existing=False,
+        )
+
+        metadata = json.loads(Path(result.metadata_path).read_text(encoding="utf-8"))
+        video_call, audio_call = mock_yt_dlp_download.call_args_list
+        assert result.status == "success"
+        assert result.note_id == task_id
+        assert metadata["platform"] == "tiktok"
+        assert metadata["note_id"] == task_id
+        assert video_call.kwargs["video_url"] == url
+        assert video_call.kwargs["task_id"] == task_id
+        assert video_call.kwargs["media_type"] == "video"
+        assert video_call.kwargs["cookies"] == {}
+        assert audio_call.kwargs["task_id"] == f"{task_id}_transcription_audio"
+        assert audio_call.kwargs["media_type"] == "audio"
+        assert audio_call.kwargs["cookies"] == {}
+        mock_xhs_download.assert_not_called()
+        mock_extract_audio.assert_not_called()
         assert mock_transcribe.call_args.kwargs["audio_path"] == str(audio_path)
 
     @patch("xhs_colab_pipeline.transcribe_with_faster_whisper")

@@ -26,13 +26,19 @@ from xhs_downloader import (
     parse_note_url,
     resolve_note_url,
 )
-from yt_dlp_downloader import build_generic_task_id, download_yt_dlp_video_result
+from yt_dlp_downloader import (
+    build_generic_task_id,
+    build_tiktok_task_id,
+    download_yt_dlp_video_result,
+    is_tiktok_url,
+)
 
 
 DEFAULT_LOCAL_ROOT = Path("/content/xhs_workspace")
 DEFAULT_DRIVE_ROOT = Path("/content/drive/MyDrive/xhs_outputs")
 PLATFORM_XIAOHONGSHU = "xiaohongshu"
 PLATFORM_DOUYIN = "douyin"
+PLATFORM_TIKTOK = "tiktok"
 PLATFORM_GENERIC = "generic"
 XIAOHONGSHU_DOMAINS = ("xiaohongshu.com", "xhslink.com")
 DOUYIN_DOMAINS = ("douyin.com", "iesdouyin.com", "amemv.com")
@@ -171,8 +177,8 @@ def resolve_workflow_identity(video_url: str) -> WorkflowIdentity:
     """
     解析流水线任务身份。
 
-    小红书使用真实 note_id；抖音优先使用视频 ID；其他站点使用 URL hash，
-    避免非小红书链接在 parse_note_url 阶段失败。
+    小红书使用真实 note_id；抖音和 TikTok 优先使用视频 ID；
+    其他站点使用 URL hash，避免非小红书链接在 parse_note_url 阶段失败。
     """
     normalized_url = video_url.replace("\\", "").strip()
     if is_xiaohongshu_url(normalized_url):
@@ -191,11 +197,32 @@ def resolve_workflow_identity(video_url: str) -> WorkflowIdentity:
             platform=PLATFORM_DOUYIN,
         )
 
+    if is_tiktok_url(normalized_url):
+        return WorkflowIdentity(
+            resolved_url=normalized_url,
+            task_id=build_tiktok_task_id(normalized_url),
+            platform=PLATFORM_TIKTOK,
+        )
+
     return WorkflowIdentity(
         resolved_url=normalized_url,
         task_id=build_generic_task_id(normalized_url),
         platform=PLATFORM_GENERIC,
     )
+
+
+def resolve_runtime_cookies_for_platform(platform: str, cookies: dict | None) -> dict:
+    """
+    解析单个平台真正应该使用的运行时 cookie。
+
+    小红书需要合并匿名基础字段；TikTok 公开视频明确走无 cookie 路径，
+    避免把其他平台传入的 cookie 写到 TikTok 临时 cookiefile。
+    """
+    if platform == PLATFORM_XIAOHONGSHU:
+        return merge_cookies(cookies)
+    if platform == PLATFORM_TIKTOK:
+        return {}
+    return cookies or {}
 
 
 def build_workflow_paths(
@@ -374,8 +401,8 @@ def prepare_transcription_audio(
     """
     准备给 Whisper 使用的转录音频。
 
-    小红书和抖音从已下载视频抽取 WAV；通用链接额外用 yt-dlp
-    直接提取 MP3，避免部分站点合并后的 MP4 再抽音频导致转录质量下降。
+    小红书和抖音从已下载视频抽取 WAV；TikTok 和通用链接额外用
+    yt-dlp 直接提取 MP3，避免部分站点合并后的 MP4 再抽音频导致转录质量下降。
     """
     if platform in {PLATFORM_XIAOHONGSHU, PLATFORM_DOUYIN}:
         return extract_audio_track(download_result.output_path, paths.local_audio_path)
@@ -531,7 +558,7 @@ def download_video_for_workflow(
     按来源选择下载器。
 
     小红书继续复用现有签名流解析；抖音走 share 页路由数据解析；
-    其他域名交给 yt-dlp。所有下载器都复用流水线已有 Drive 目录。
+    TikTok 和其他域名交给 yt-dlp。所有下载器都复用流水线已有 Drive 目录。
     """
     if platform == PLATFORM_XIAOHONGSHU:
         return download_xhs_video_result(
@@ -603,7 +630,7 @@ def run_single_workflow(
       5. 将最终结果复制到 Drive
     """
     identity = resolve_workflow_identity(note_url)
-    runtime_cookies = merge_cookies(cookies) if identity.platform == PLATFORM_XIAOHONGSHU else (cookies or {})
+    runtime_cookies = resolve_runtime_cookies_for_platform(identity.platform, cookies)
     paths = build_workflow_paths(
         note_id=identity.task_id,
         local_root=local_root,

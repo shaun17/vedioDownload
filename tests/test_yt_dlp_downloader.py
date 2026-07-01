@@ -20,8 +20,10 @@ from yt_dlp_downloader import (
     DEFAULT_YT_DLP_VIDEO_FORMAT,
     build_generic_task_id,
     build_netscape_cookie_file_text,
+    build_tiktok_task_id,
     build_yt_dlp_options,
     download_yt_dlp_video_result,
+    is_tiktok_url,
     load_yt_dlp_module,
     parse_cli_arguments,
     resolve_downloaded_file,
@@ -93,6 +95,25 @@ class TestGenericTaskId:
         assert build_generic_task_id("https://example.com/a") != build_generic_task_id(
             "https://example.com/b"
         )
+
+
+class TestTikTokTaskId:
+    def test_tiktok_url_detection_matches_regular_and_short_domains(self):
+        assert is_tiktok_url("https://www.tiktok.com/@theoffice/video/7637558012294483214") is True
+        assert is_tiktok_url("https://vm.tiktok.com/ZTR45GpSF/") is True
+        assert is_tiktok_url("https://example.com/watch?v=abc") is False
+
+    def test_build_tiktok_task_id_uses_video_id_when_present(self):
+        url = (
+            "https://www.tiktok.com/@theoffice/video/7637558012294483214"
+            "?is_from_webapp=1&sender_device=pc"
+        )
+        assert build_tiktok_task_id(url) == "tiktok_7637558012294483214"
+
+    def test_build_tiktok_task_id_falls_back_to_stable_hash_for_short_links(self):
+        url = "https://vm.tiktok.com/ZTR45GpSF/"
+        assert build_tiktok_task_id(url) == build_tiktok_task_id(url)
+        assert build_tiktok_task_id(url).startswith("tiktok_")
 
 
 class TestYtDlpOptions:
@@ -215,6 +236,39 @@ class TestDownloadYtDlpVideoResult:
         assert FakeYoutubeDL.latest_cookiefile_text is not None
         assert "s_v_web_id\tfresh-cookie" in FakeYoutubeDL.latest_cookiefile_text
         assert cookiefile.exists() is False
+
+    @patch("yt_dlp_downloader.load_yt_dlp_module", return_value=FakeYtDlpModule)
+    def test_tiktok_download_ignores_runtime_cookies(
+        self,
+        _mock_loader,
+        tmp_path,
+    ):
+        result = download_yt_dlp_video_result(
+            video_url="https://www.tiktok.com/@theoffice/video/7637558012294483214",
+            output_dir=tmp_path,
+            task_id="tiktok_7637558012294483214",
+            cookies={"sid_tt": "should-not-be-written"},
+            quiet=True,
+        )
+
+        assert result.note_id == "tiktok_7637558012294483214"
+        assert "cookiefile" not in FakeYoutubeDL.latest_options
+        assert FakeYoutubeDL.latest_cookiefile_text is None
+
+    @patch("yt_dlp_downloader.load_yt_dlp_module", return_value=FakeYtDlpModule)
+    def test_tiktok_download_uses_video_id_as_default_task_id(
+        self,
+        _mock_loader,
+        tmp_path,
+    ):
+        result = download_yt_dlp_video_result(
+            video_url="https://www.tiktok.com/@theoffice/video/7637558012294483214",
+            output_dir=tmp_path,
+            quiet=True,
+        )
+
+        assert result.note_id == "tiktok_7637558012294483214"
+        assert result.output_path.endswith("tiktok_7637558012294483214.mp4")
 
 class TestCliArguments:
     def test_parse_cli_arguments_uses_default_output_dir_and_video_mode(self):
