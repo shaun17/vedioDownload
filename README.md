@@ -125,7 +125,7 @@ vedioDownload/
 | 来源 | 下载实现 | 最终媒体 | 会话信息 | 说明 |
 | --- | --- | --- | --- | --- |
 | 小红书 / `xhslink.com` | `xhs_downloader.py` | MP4 | 可选、仅运行时 | 支持编码偏好、画质索引与媒体断点续传 |
-| 抖音 | `douyin_downloader.py` | MP4 | 默认不需要 | 使用专用适配器处理可公开访问的视频页面 |
+| 抖音 | `douyin_downloader.py` | MP4 | 自动初始化匿名访客会话 | 无需手动提供 Cookie，使用同一会话解析分享页并下载公开媒体 |
 | TikTok | `yt_dlp_downloader.py` | MP4 | 不混用其他来源信息 | 使用稳定视频 ID 或 URL 摘要作为任务 ID |
 | 其他来源 | `yt_dlp_downloader.py` | 通常为 MP4 | 取决于来源 | 实际能力取决于当前 yt-dlp 版本和目标页面可访问性 |
 

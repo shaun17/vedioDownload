@@ -2,9 +2,9 @@
 抖音视频下载器。
 
 核心路径：
-  1. 把 /video/{id} 转成 /share/video/{id}/
+  1. 自动初始化匿名访客会话，把 /video/{id} 转成 /share/video/{id}/
   2. 从 share 页的 window._ROUTER_DATA 提取 video.play_addr.url_list
-  3. 直接下载 play_addr 指向的公开媒体文件
+  3. 使用同一会话下载 play_addr 指向的公开媒体文件
 """
 
 from __future__ import annotations
@@ -162,9 +162,19 @@ def download_file(session: requests.Session, media_url: str, output_path: str | 
 
 
 def build_session(session: requests.Session | None = None) -> requests.Session:
-    """构建抖音下载请求会话，并统一使用移动端 UA。"""
+    """使用移动端 UA，并在缺少 ttwid 时自动申请匿名访客 Cookie。"""
     runtime_session = session or requests.Session()
     runtime_session.headers.update(DOUYIN_HEADERS)
+    if not runtime_session.cookies.get("ttwid"):
+        # 缺少访客 Cookie 时，分享页可能返回 HTTP 200，却不包含视频数据。
+        response = runtime_session.post(
+            "https://www.douyin.com/ttwid/register",
+            json={"aid": 6383, "service": "www.douyin.com"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        if not runtime_session.cookies.get("ttwid"):
+            raise RuntimeError("抖音匿名访客会话初始化失败：未收到 ttwid Cookie")
     return runtime_session
 
 

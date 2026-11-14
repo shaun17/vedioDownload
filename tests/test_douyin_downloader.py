@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+import requests
 
 from douyin_downloader import (
     build_douyin_share_url,
@@ -30,14 +31,16 @@ SAMPLE_ROUTER_HTML = """
 class FakeResponse:
     """模拟 requests 响应对象。"""
 
-    def __init__(self, text="", body=b"", url="https://example.com/video.mp4"):
+    def __init__(self, text="", body=b"", url="https://example.com/video.mp4", status_code=200):
         self.text = text
         self.body = body
         self.url = url
         self.headers = {"Content-Length": str(len(body))} if body else {}
+        self.status_code = status_code
 
     def raise_for_status(self):
-        """测试响应默认都是成功状态。"""
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
 
     def iter_content(self, chunk_size=65536):
         """按 requests 流式接口返回内容。"""
@@ -47,14 +50,25 @@ class FakeResponse:
 class FakeSession:
     """模拟抖音 share 页面请求和媒体下载请求。"""
 
-    def __init__(self):
+    def __init__(self, registration_status=200, issue_cookie=True):
         self.headers = {}
         self.calls = []
+        self.cookies = requests.cookies.RequestsCookieJar()
+        self.registration_status = registration_status
+        self.issue_cookie = issue_cookie
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if self.issue_cookie and self.registration_status == 200:
+            self.cookies.set("ttwid", "anonymous-visitor", domain=".douyin.com", path="/")
+        return FakeResponse(status_code=self.registration_status)
 
     def get(self, url, **kwargs):
         """根据 URL 返回页面或媒体内容。"""
         self.calls.append((url, kwargs))
         if "share/video" in url:
+            if not self.cookies.get("ttwid"):
+                return FakeResponse(text='<script>window._ROUTER_DATA = {"loaderData":{},"errors":null}</script>')
             return FakeResponse(text=SAMPLE_ROUTER_HTML, url=url)
         return FakeResponse(body=b"video-bytes", url=url)
 
@@ -112,5 +126,42 @@ class TestDownloadDouyinVideoResult:
         assert result.height == 1920
         assert result.size == len(b"video-bytes")
         assert Path(result.output_path).read_bytes() == b"video-bytes"
-        assert session.calls[0][0] == "https://www.douyin.com/share/video/7646960381037995690/"
-        assert session.calls[1][0].startswith("https://aweme.snssdk.com/aweme/v1/playwm/")
+        assert session.calls[0][0] == "https://www.douyin.com/ttwid/register"
+        assert session.calls[1][0] == "https://www.douyin.com/share/video/7646960381037995690/"
+        assert session.calls[2][0].startswith("https://aweme.snssdk.com/aweme/v1/playwm/")
+
+    def test_existing_visitor_session_is_reused(self, tmp_path):
+        session = FakeSession()
+        session.cookies.set("ttwid", "existing-visitor", domain=".douyin.com", path="/")
+
+        result = download_douyin_video_result(
+            "https://www.douyin.com/video/7646960381037995690",
+            output_dir=tmp_path,
+            session=session,
+        )
+
+        assert Path(result.output_path).read_bytes() == b"video-bytes"
+        assert len(session.calls) == 2
+        assert session.cookies.get("ttwid") == "existing-visitor"
+
+    @pytest.mark.parametrize(
+        ("registration_status", "issue_cookie", "error_type", "message"),
+        [
+            (503, False, requests.HTTPError, "HTTP 503"),
+            (200, False, RuntimeError, "匿名访客会话初始化失败"),
+        ],
+    )
+    def test_failed_registration_stops_before_page_and_media_requests(
+        self, tmp_path, registration_status, issue_cookie, error_type, message
+    ):
+        session = FakeSession(registration_status, issue_cookie)
+
+        with pytest.raises(error_type, match=message):
+            download_douyin_video_result(
+                "https://www.douyin.com/video/7646960381037995690",
+                output_dir=tmp_path,
+                session=session,
+            )
+
+        assert len(session.calls) == 1
+        assert list(tmp_path.iterdir()) == []
