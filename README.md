@@ -328,7 +328,19 @@ for result in results:
 
 #### 3. 执行批量工作流
 
+Colab 会缓存已经导入的 Python 模块。若在同一运行时中执行过 `git pull`，只重新执行 `from ... import ...` 不会加载新代码。下面的单元会先重载下载器，再重载流水线，让刚拉取的修复生效，无需重启 GPU 运行时。
+
 ```python
+import importlib
+
+import douyin_downloader
+import xhs_downloader
+import yt_dlp_downloader
+import xhs_colab_pipeline
+
+for module in (xhs_downloader, douyin_downloader, yt_dlp_downloader, xhs_colab_pipeline):
+    importlib.reload(module)
+
 from xhs_colab_pipeline import run_colab_workflow
 
 URLS = [
