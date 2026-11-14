@@ -22,7 +22,9 @@ from xhs_colab_pipeline import (
     build_workflow_paths,
     find_existing_media_output,
     has_existing_drive_outputs,
+    find_nvidia_library_files,
     is_douyin_url,
+    is_missing_cuda_library_error,
     is_tiktok_url,
     is_xiaohongshu_url,
     normalize_note_urls,
@@ -31,6 +33,7 @@ from xhs_colab_pipeline import (
     resolve_workflow_identity,
     resolve_transcription_runtime,
     run_single_workflow,
+    transcribe_with_faster_whisper,
 )
 
 
@@ -76,6 +79,93 @@ class TestResolveTranscriptionRuntime:
 
     def test_cpu_runtime_uses_cpu_int8(self):
         assert resolve_transcription_runtime(False) == ("cpu", "int8")
+
+
+class TestCudaLibraryHelpers:
+    def test_finds_cublas_and_cudnn_libraries_in_site_packages(self, tmp_path):
+        cublas_dir = tmp_path / "nvidia" / "cublas" / "lib"
+        cudnn_dir = tmp_path / "nvidia" / "cudnn" / "lib"
+        other_dir = tmp_path / "nvidia" / "nccl" / "lib"
+        for directory in (cublas_dir, cudnn_dir, other_dir):
+            directory.mkdir(parents=True)
+        (cublas_dir / "libcublas.so.12").touch()
+        (cublas_dir / "libcublasLt.so.12").touch()
+        (cudnn_dir / "libcudnn.so.9").touch()
+        (other_dir / "libnccl.so.2").touch()
+
+        names = [path.name for path in find_nvidia_library_files([tmp_path, tmp_path / "missing"])]
+
+        assert names == ["libcublas.so.12", "libcublasLt.so.12", "libcudnn.so.9"]
+
+    def test_detects_missing_cuda_library_errors(self):
+        assert is_missing_cuda_library_error(
+            RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+        )
+        assert is_missing_cuda_library_error(OSError("Unable to load libcudnn_ops.so.9"))
+        assert not is_missing_cuda_library_error(ValueError("bad audio"))
+
+
+class TestTranscriptionFallback:
+    @staticmethod
+    def _fake_result(device, compute_type):
+        return TranscriptionResult(
+            text="ok",
+            language="zh",
+            language_probability=1.0,
+            model_name="turbo",
+            device=device,
+            compute_type=compute_type,
+            segments=[],
+        )
+
+    @patch("xhs_colab_pipeline.preload_cuda_libraries")
+    @patch("xhs_colab_pipeline.probe_cuda_available", return_value=True)
+    @patch("xhs_colab_pipeline.run_faster_whisper")
+    def test_auto_gpu_falls_back_to_cpu_when_cuda_library_missing(self, mock_run, _probe, mock_preload):
+        mock_run.side_effect = [
+            RuntimeError("Library libcublas.so.12 is not found or cannot be loaded"),
+            self._fake_result("cpu", "int8"),
+        ]
+
+        with pytest.warns(RuntimeWarning, match="CPU int8"):
+            result = transcribe_with_faster_whisper("audio.mp3", language="zh")
+
+        assert result.device == "cpu"
+        mock_preload.assert_called_once()
+        assert [call.kwargs["device"] for call in mock_run.call_args_list] == ["cuda", "cpu"]
+
+    @patch("xhs_colab_pipeline.preload_cuda_libraries")
+    @patch("xhs_colab_pipeline.probe_cuda_available", return_value=True)
+    @patch("xhs_colab_pipeline.run_faster_whisper")
+    def test_explicit_cuda_keeps_original_error(self, mock_run, _probe, _preload):
+        mock_run.side_effect = RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+
+        with pytest.raises(RuntimeError, match="libcublas"):
+            transcribe_with_faster_whisper("audio.mp3", device="cuda")
+
+        assert mock_run.call_count == 1
+
+    @patch("xhs_colab_pipeline.preload_cuda_libraries")
+    @patch("xhs_colab_pipeline.probe_cuda_available", return_value=True)
+    @patch("xhs_colab_pipeline.run_faster_whisper")
+    def test_unrelated_gpu_error_is_not_swallowed(self, mock_run, _probe, _preload):
+        mock_run.side_effect = ValueError("bad audio")
+
+        with pytest.raises(ValueError):
+            transcribe_with_faster_whisper("audio.mp3")
+
+        assert mock_run.call_count == 1
+
+    @patch("xhs_colab_pipeline.preload_cuda_libraries")
+    @patch("xhs_colab_pipeline.probe_cuda_available", return_value=False)
+    @patch("xhs_colab_pipeline.run_faster_whisper")
+    def test_cpu_runtime_skips_cuda_preload(self, mock_run, _probe, mock_preload):
+        mock_run.return_value = self._fake_result("cpu", "int8")
+
+        transcribe_with_faster_whisper("audio.mp3")
+
+        mock_preload.assert_not_called()
+        assert mock_run.call_args.kwargs["device"] == "cpu"
 
 
 class TestBuildWorkflowPaths:

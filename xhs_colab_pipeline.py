@@ -10,9 +10,12 @@ Colab 多平台视频下载与转录流水线。
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import shutil
 import subprocess
+import sys
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -151,6 +154,56 @@ def resolve_transcription_runtime(has_cuda: bool) -> tuple[str, str]:
     if has_cuda:
         return "cuda", "float16"
     return "cpu", "int8"
+
+
+# CTranslate2 4.x 通过 dlopen 按 soname 查找 CUDA 12 的 cuBLAS 与 cuDNN 9。
+# pip 安装的 nvidia-* 包把库放在 site-packages/nvidia/<pkg>/lib，
+# 不在 LD_LIBRARY_PATH 上；提前以 RTLD_GLOBAL 加载后，dlopen 会复用已加载的库。
+CUDA_LIBRARY_PACKAGES = ("cublas", "cudnn")
+MISSING_CUDA_LIBRARY_MARKERS = ("libcublas", "libcudnn", "cannot be loaded")
+
+
+def find_nvidia_library_files(search_roots: Iterable[str | Path]) -> list[Path]:
+    """在 site-packages 中查找 nvidia-cublas/cudnn 包提供的共享库。"""
+    library_files: list[Path] = []
+    for root in search_roots:
+        for package in CUDA_LIBRARY_PACKAGES:
+            lib_dir = Path(root) / "nvidia" / package / "lib"
+            if lib_dir.is_dir():
+                library_files.extend(sorted(lib_dir.glob("lib*.so*")))
+    return library_files
+
+
+def preload_cuda_libraries(search_roots: Iterable[str | Path] | None = None) -> list[str]:
+    """
+    预加载 pip 安装的 cuBLAS / cuDNN，返回成功加载的库名。
+
+    库之间存在依赖顺序（如 libcublas 依赖 libcublasLt），
+    这里多轮重试直到没有新库加载成功，避免手写顺序。
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    roots = list(search_roots) if search_roots is not None else list(sys.path)
+    pending = find_nvidia_library_files(roots)
+    loaded: list[str] = []
+    while pending:
+        remaining: list[Path] = []
+        for library_file in pending:
+            try:
+                ctypes.CDLL(str(library_file), mode=ctypes.RTLD_GLOBAL)
+                loaded.append(library_file.name)
+            except OSError:
+                remaining.append(library_file)
+        if len(remaining) == len(pending):
+            break
+        pending = remaining
+    return loaded
+
+
+def is_missing_cuda_library_error(error: BaseException) -> bool:
+    """判断异常是否由 CUDA 运行库缺失导致。"""
+    message = str(error)
+    return any(marker in message for marker in MISSING_CUDA_LIBRARY_MARKERS)
 
 
 def is_host_in_domains(video_url: str, domains: tuple[str, ...]) -> bool:
@@ -454,12 +507,52 @@ def transcribe_with_faster_whisper(
     依赖在函数内部导入，这样本地开发时不会因为未安装
     faster-whisper 而导致整个模块无法导入。
     """
+    auto_device, auto_compute_type = resolve_transcription_runtime(probe_cuda_available())
+    resolved_device = device or auto_device
+    resolved_compute_type = compute_type or auto_compute_type
+
+    run_kwargs = {
+        "audio_path": audio_path,
+        "model_name": model_name,
+        "language": language,
+        "beam_size": beam_size,
+        "word_timestamps": word_timestamps,
+        "vad_filter": vad_filter,
+    }
+    if resolved_device != "cuda":
+        return run_faster_whisper(device=resolved_device, compute_type=resolved_compute_type, **run_kwargs)
+
+    preload_cuda_libraries()
+    try:
+        return run_faster_whisper(device=resolved_device, compute_type=resolved_compute_type, **run_kwargs)
+    except Exception as error:
+        # 只在自动选择 GPU 时回退；调用方显式指定 cuda 则保留原始错误。
+        if device == "cuda" or not is_missing_cuda_library_error(error):
+            raise
+        warnings.warn(
+            f"GPU 转录缺少 CUDA 运行库（{error}），已回退到 CPU int8。"
+            "安装 requirements-colab.txt 并重启会话后可恢复 GPU 转录。",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return run_faster_whisper(device="cpu", compute_type="int8", **run_kwargs)
+
+
+def run_faster_whisper(
+    audio_path: str | Path,
+    model_name: str,
+    language: str | None,
+    beam_size: int,
+    word_timestamps: bool,
+    vad_filter: bool,
+    device: str,
+    compute_type: str,
+) -> TranscriptionResult:
+    """在指定设备上加载模型并完整消费转录结果。"""
     from faster_whisper import WhisperModel
 
-    resolved_device, resolved_compute_type = resolve_transcription_runtime(probe_cuda_available())
-    resolved_device = device or resolved_device
-    resolved_compute_type = compute_type or resolved_compute_type
-
+    resolved_device = device
+    resolved_compute_type = compute_type
     model = WhisperModel(
         model_name,
         device=resolved_device,

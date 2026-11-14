@@ -2,3 +2,6 @@
 faster-whisper>=1.1.0
 # faster-whisper 1.2.1 still passes metadata_errors to av.open; PyAV 19 removed it.
 av>=11,<19
+# CTranslate2 4.x needs CUDA 12 cuBLAS + cuDNN 9; Colab's torch may not expose them on the loader path.
+nvidia-cublas-cu12; sys_platform == "linux"
+nvidia-cudnn-cu12>=9,<10; sys_platform == "linux"

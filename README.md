@@ -461,6 +461,14 @@ print({
 
 安装完成后重启 Python 会话，重新执行工作流。`HF_TOKEN` 未设置的提示只涉及 Hugging Face 模型下载限流，不是这个参数错误的原因。
 
+若转录报 `Library libcublas.so.12 is not found or cannot be loaded`（或 `libcudnn*.so.9`），说明 faster-whisper 依赖的 CTranslate2 找不到 CUDA 12 cuBLAS / cuDNN 9。`requirements-colab.txt` 已加入 `nvidia-cublas-cu12` 与 `nvidia-cudnn-cu12`，工作流在 GPU 转录前会自动预加载它们；已有会话可先运行：
+
+```python
+%pip install -q nvidia-cublas-cu12 "nvidia-cudnn-cu12>=9,<10"
+```
+
+安装后重新导入模块即可。若库仍不可用，工作流会给出 `RuntimeWarning` 并自动回退到 CPU int8 转录，结果仍会保存，但速度明显变慢；元数据里的 `device` 字段会记录实际使用的设备。
+
 ---
 
 ## CLI 命令速查
