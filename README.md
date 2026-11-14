@@ -96,6 +96,7 @@ vedioDownload/
 | 进度 | tqdm | 4.66.0+ | 下载进度展示 |
 | 通用下载 | yt-dlp | 2024.1.1+ | 处理其当前支持的公开媒体页面 |
 | 转录 | faster-whisper | 1.1.0+ | Colab 或可选本地语音转文字 |
+| 音频解码 | PyAV | 11.x–18.x | 使用与 faster-whisper 已发布版本兼容的音频解码接口 |
 | 媒体处理 | FFmpeg / ffprobe | 系统命令 | 合并音视频、提取转录音频 |
 | 测试 | pytest | 8.0.0+ | 自动化验证 |
 
@@ -326,6 +327,8 @@ for result in results:
 !command -v ffmpeg >/dev/null || (apt-get update -qq && apt-get install -y -qq ffmpeg)
 ```
 
+如果当前会话已导入过 PyAV，安装或降级它后，需要通过“运行时 → 重新启动会话”重启 Python，再执行后续单元。PyAV 包含本地扩展，下面的 Python 模块重载步骤不能替代这次重启。
+
 #### 3. 执行批量工作流
 
 Colab 会缓存已经导入的 Python 模块。若在同一运行时中执行过 `git pull`，只重新执行 `from ... import ...` 不会加载新代码。下面的单元会先重载下载器，再重载流水线，让刚拉取的修复生效，无需重启 GPU 运行时。
@@ -449,6 +452,14 @@ print({
 ```
 
 若 GPU 初始化报错，先核对当前 Colab CUDA 环境与 [faster-whisper GPU 要求](https://github.com/SYSTRAN/faster-whisper#gpu)；若通用下载无法合并音视频，检查系统是否存在 `ffmpeg` 与 `ffprobe`，并参考 [yt-dlp 依赖说明](https://github.com/yt-dlp/yt-dlp#dependencies)。
+
+若视频已下载，随后报 `open() got an unexpected keyword argument 'metadata_errors'`，这是 faster-whisper 1.2.1 与 PyAV 19 的[接口不兼容](https://github.com/SYSTRAN/faster-whisper/pull/1495)。`requirements-colab.txt` 已限制 `av<19`；已有会话可先运行：
+
+```python
+%pip install -q "av>=11,<19"
+```
+
+安装完成后重启 Python 会话，重新执行工作流。`HF_TOKEN` 未设置的提示只涉及 Hugging Face 模型下载限流，不是这个参数错误的原因。
 
 ---
 
